@@ -78,6 +78,8 @@ jobs:
         with:
           python-version: '3.14t'
           architecture: x64
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Restore pinned host Rust 1.91.1 toolchain
         id: host-rustup
         uses: actions/cache/restore@v4
@@ -205,6 +207,8 @@ jobs:
         with:
           python-version: '3.14t'
           architecture: x64
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Restore pinned host Rust 1.91.1 toolchain
         id: host-rustup
         uses: actions/cache/restore@v4
@@ -412,6 +416,8 @@ jobs:
         with:
           python-version: '3.14t'
           architecture: x64
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Verify source run id for artifact download
         shell: python
         env:
