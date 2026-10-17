@@ -432,7 +432,8 @@ jobs:
           name: candidate-rocksdict11-${{ matrix.platform }}-${{ inputs.source_run_id }}
           path: dist
       - name: Install candidate wheel offline
-        run: python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
+        run: |
+          python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
       - name: Check GIL stays disabled and RocksDB 11 ABI
         shell: python
         run: |
