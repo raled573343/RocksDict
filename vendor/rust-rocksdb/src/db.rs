@@ -456,7 +456,10 @@ pub struct DBCommon<T: ThreadMode, D: DBInner> {
     pub(crate) inner: D,
     cfs: T, // Column families are held differently depending on thread mode
     path: PathBuf,
-    _outlive: Vec<OptionsMustOutliveDB>,
+    // Includes callbacks registered when CFs are created after DB::Open.
+    // RwLock is required because MultiThreaded::create_cf takes &self.
+    // Retain these dependencies until after the native DB is destroyed.
+    _outlive: RwLock<Vec<OptionsMustOutliveDB>>,
     /// The TTL this DB was opened with, if it was opened with one.
     ///
     /// Two things need it. `create_cf_with_ttl` reaches a C function that casts the
@@ -1145,7 +1148,7 @@ impl<T: ThreadMode> DBWithThreadMode<T> {
             inner: DBWithThreadModeInner { inner: db },
             path: path.as_ref().to_path_buf(),
             cfs: T::new_cf_map_internal(cf_map),
-            _outlive: outlive,
+            _outlive: RwLock::new(outlive),
             opened_with_ttl: match access_type {
                 AccessType::WithTTL { ttl } => Some(*ttl),
                 _ => None,
@@ -1511,9 +1514,17 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
             inner,
             cfs,
             path,
-            _outlive: outlive,
+            _outlive: RwLock::new(outlive),
             opened_with_ttl: None,
         }
+    }
+
+    /// Dynamic column-family creation must retain any comparator, callbacks,
+    /// cache and other native pointers referenced by the new column family.
+    /// Options::set_comparator() stores raw pointers in C++; the temporary
+    /// caller-owned Options can be dropped immediately after create_cf().
+    fn retain_created_cf_options(&self, opts: &Options) {
+        self._outlive.write().push(opts.outlive.clone());
     }
 
     pub fn list_cf<P: AsRef<Path>>(opts: &Options, path: P) -> Result<Vec<String>, Error> {
@@ -5368,6 +5379,7 @@ impl<I: DBInner> DBCommon<SingleThreaded, I> {
     /// Creates column family with given name and options
     pub fn create_cf<N: AsRef<str>>(&mut self, name: N, opts: &Options) -> Result<(), Error> {
         let inner = self.create_inner_cf_handle(name.as_ref(), opts)?;
+        self.retain_created_cf_options(opts);
         self.cfs
             .cfs
             .insert(name.as_ref().to_string(), ColumnFamily { inner });
@@ -5394,6 +5406,7 @@ impl<I: DBInner> DBCommon<SingleThreaded, I> {
         ttl: ColumnFamilyTtl,
     ) -> Result<(), Error> {
         let inner = self.create_inner_cf_handle_with_ttl(name.as_ref(), opts, ttl)?;
+        self.retain_created_cf_options(opts);
         self.cfs
             .cfs
             .insert(name.as_ref().to_string(), ColumnFamily { inner });
@@ -5422,6 +5435,10 @@ impl<I: DBInner> DBCommon<SingleThreaded, I> {
     {
         let names = convert_cf_names(names)?;
         let created = self.create_inner_cf_handles(&names, opts);
+        // Even a partially successful bulk operation must keep callbacks alive.
+        if !created.handles.is_empty() {
+            self.retain_created_cf_options(opts);
+        }
         for ((name, _), inner) in names.into_iter().zip(created.handles) {
             self.cfs.cfs.insert(name, ColumnFamily { inner });
         }
@@ -5454,6 +5471,7 @@ impl<I: DBInner> DBCommon<SingleThreaded, I> {
                 metadata.inner
             ))
         };
+        self.retain_created_cf_options(options);
         self.cfs
             .cfs
             .insert(column_family_name.as_ref().into(), ColumnFamily { inner });
@@ -5529,6 +5547,7 @@ impl<I: DBInner> DBCommon<MultiThreaded, I> {
         // another caller who observed the handle as missing.
         let mut cfs = self.cfs.cfs.write();
         let inner = self.create_inner_cf_handle(name.as_ref(), opts)?;
+        self.retain_created_cf_options(opts);
         cfs.insert(
             name.as_ref().to_string(),
             Arc::new(UnboundColumnFamily { inner }),
@@ -5559,6 +5578,7 @@ impl<I: DBInner> DBCommon<MultiThreaded, I> {
         // another caller who observed the handle as missing.
         let mut cfs = self.cfs.cfs.write();
         let inner = self.create_inner_cf_handle_with_ttl(name.as_ref(), opts, ttl)?;
+        self.retain_created_cf_options(opts);
         cfs.insert(
             name.as_ref().to_string(),
             Arc::new(UnboundColumnFamily { inner }),
@@ -5586,6 +5606,10 @@ impl<I: DBInner> DBCommon<MultiThreaded, I> {
         // another caller who observed the handles as missing.
         let mut cfs = self.cfs.cfs.write();
         let created = self.create_inner_cf_handles(&names, opts);
+        // Even a partially successful bulk operation must keep callbacks alive.
+        if !created.handles.is_empty() {
+            self.retain_created_cf_options(opts);
+        }
         for ((name, _), inner) in names.into_iter().zip(created.handles) {
             cfs.insert(name, Arc::new(UnboundColumnFamily { inner }));
         }
@@ -5620,6 +5644,7 @@ impl<I: DBInner> DBCommon<MultiThreaded, I> {
                 metadata.inner
             ))
         };
+        self.retain_created_cf_options(options);
         cfs.insert(
             column_family_name.as_ref().to_string(),
             Arc::new(UnboundColumnFamily { inner }),

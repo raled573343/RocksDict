@@ -166,6 +166,32 @@ class RocksDB11Integration(unittest.TestCase):
                 db.close()
             Rdict.destroy(path)
 
+    def test_dynamic_cf_comparator_survives_temporary_options(self):
+        import gc
+        with tempfile.TemporaryDirectory(prefix="rd11-cf-options-lifetime-") as folder:
+            path = str(Path(folder) / "db")
+            db = Rdict(path)
+            try:
+                # create_column_family defaults to a TEMPORARY Options object.
+                # Its native comparator must live until the native DB shuts down.
+                cf = db.create_column_family("temporary_comparator")
+                gc.collect()
+                for index in range(250):
+                    cf[str(index)] = index * index
+                for index in range(250):
+                    self.assertEqual(cf[str(index)], index * index)
+                cf.close()
+            finally:
+                db.close()
+            reopened = Rdict(path)
+            try:
+                cf = reopened.get_column_family("temporary_comparator")
+                self.assertEqual(cf["50"], 2500)
+                cf.close()
+            finally:
+                reopened.close()
+            Rdict.destroy(path)
+
     def test_column_family_options_reload(self):
         with tempfile.TemporaryDirectory(prefix="rd11-cf-") as folder:
             path = str(Path(folder) / "db")
