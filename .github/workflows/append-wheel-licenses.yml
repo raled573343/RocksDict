@@ -1,0 +1,115 @@
+name: Add native license notices to published cp314t wheels (no rebuild)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cp314t-license-preview
+  cancel-in-progress: false
+
+jobs:
+  repack:
+    name: Repack four verified wheels without Rust/C++ compilation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout pinned packaging and notice files
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Cache original binary assets BEFORE any download. Key contains all four
+      # original GitHub Release SHA-256 prefixes; never reuse changed binaries.
+      - name: Restore cached original release wheels
+        uses: actions/cache@v4
+        with:
+          path: original
+          key: cp314t-legal-original-v1-f6617bd2-84fbc81e-414c4a36-ec0e1246
+
+      - name: Download only missing original wheel pairs from existing releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tag in cp314t-v0.3.29 cp314t-v0.3.29-rocksdb11.8.1; do
+            folder="original/$tag"
+            count=0
+            if [[ -d "$folder" ]]; then
+              count="$(find "$folder" -maxdepth 1 -name '*.whl' -type f | wc -l)"
+            fi
+            if [[ "$count" -ne 2 ]]; then
+              rm -rf "$folder"
+              mkdir -p "$folder"
+              gh release download "$tag" --pattern '*.whl' --dir "$folder"
+            else
+              echo "Using cached wheels for $tag"
+            fi
+          done
+
+      - name: Check source SHA-256, append licenses and recalculate RECORD
+        run: |
+          python tools/repack_cp314t_licenses.py original legal-preview LICENSES
+
+      - name: Restore free-threaded Python runtime for import smoke
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14t'
+          architecture: x64
+
+      - name: No-GIL install/import smoke with repacked Linux wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys, sysconfig
+          assert sys.version_info[:2] == (3, 14)
+          assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+          assert not sys._is_gil_enabled()
+          PY
+          for tag in cp314t-v0.3.29 cp314t-v0.3.29-rocksdb11.8.1; do
+            wheel="$(find "legal-preview/$tag" -maxdepth 1 -name '*manylinux_2_28_x86_64.whl' -print -quit)"
+            test -n "$wheel"
+            target="$RUNNER_TEMP/rocksdict-smoke/$tag"
+            mkdir -p "$target"
+            python -m pip install --no-index --no-deps --target "$target" "$wheel"
+            PYTHONPATH="$target" RELEASE_TAG="$tag" python -X gil=0 - <<'PY'
+          import os, sys, rocksdict
+          assert not sys._is_gil_enabled()
+          assert hasattr(rocksdict, "Rdict")
+          if "rocksdb11.8.1" in os.environ["RELEASE_TAG"]:
+              assert rocksdict.native_rocksdb_version() == (11, 8, 1)
+          print("Repacked wheel import OK:", os.environ["RELEASE_TAG"])
+          PY
+          done
+
+      - name: Report SHA256SUMS for the NEW (different) wheel binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## License-repacked cp314t wheels — preview only"
+            echo
+            echo "**No native recompilation. No existing GitHub Release was modified.**"
+            echo
+            echo "**Legal status:** Apache-2.0 and inherited LevelDB notices added; full license inventory of statically linked compression/runtime components is still pending."
+            echo
+            for tag in cp314t-v0.3.29 cp314t-v0.3.29-rocksdb11.8.1; do
+              echo "### $tag"
+              echo '~~~'
+              cat "legal-preview/$tag/SHA256SUMS"
+              echo '~~~'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload repacked preview wheels, grouped by original tag
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocksdict-cp314t-license-preview-${{ github.run_id }}
+          path: legal-preview/
+          if-no-files-found: error
+          retention-days: 30
