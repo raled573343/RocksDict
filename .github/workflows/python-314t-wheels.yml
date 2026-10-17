@@ -40,9 +40,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
-      # Inside manylinux the workspace is bind-mounted at the same absolute path.
-      # Persist Cargo downloads and compiled Rust/C++ objects on the host filesystem.
-      CARGO_HOME: ${{ github.workspace }}/.ci-cargo
+      # Don't move CARGO_HOME: manylinux keeps rustup binaries in /root/.cargo/bin.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_INCREMENTAL: '0'
     strategy:
@@ -69,6 +67,8 @@ jobs:
           path: |
             .ci-cargo/registry
             .ci-cargo/git
+            ~/.cargo/registry
+            ~/.cargo/git
             target
           # OS + ABI + pinned rustc + Cargo manifests isolate incompatible object files.
           key: rust314t-v2-${{ runner.os }}-${{ matrix.platform }}-rust1911-${{ hashFiles('Cargo.lock', 'rust-rocksdb/Cargo.lock', 'rust-rocksdb/Cargo.toml', 'rust-rocksdb/librocksdb-sys/Cargo.toml') }}
@@ -126,9 +126,10 @@ jobs:
           rust-toolchain: '1.91.1'
           target: x86_64
           manylinux: '2_28'
-          # Explicitly forward the two workspace-bound Cargo paths into Docker.
+          # Keep rustup on container PATH; share just downloads and build target.
           docker-options: >-
-            --env CARGO_HOME=${{ github.workspace }}/.ci-cargo
+            --volume ${{ github.workspace }}/.ci-cargo/registry:/root/.cargo/registry
+            --volume ${{ github.workspace }}/.ci-cargo/git:/root/.cargo/git
             --env CARGO_TARGET_DIR=${{ github.workspace }}/target
           before-script-linux: |
             dnf install -y clang clang-devel llvm-devel cmake make perl
@@ -188,6 +189,8 @@ jobs:
           path: |
             .ci-cargo/registry
             .ci-cargo/git
+            ~/.cargo/registry
+            ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
