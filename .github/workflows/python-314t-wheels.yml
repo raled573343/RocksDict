@@ -75,6 +75,20 @@ jobs:
           restore-keys: |
             rust314t-v2-${{ runner.os }}-${{ matrix.platform }}-rust1911-
 
+      - name: Report restored Cargo cache status
+        shell: python
+        env:
+          RUST_BUILD_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: |
+          import os
+          from pathlib import Path
+          hit = os.environ.get("RUST_BUILD_CACHE_HIT") == "true"
+          target = Path(os.environ["CARGO_TARGET_DIR"])
+          print(f"Rust/C++ compiled-object cache exact hit: {hit}")
+          print(f"Restored target exists: {target.is_dir()}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write(f"Cargo compiled-object cache exact hit: **{hit}**\\n\\n")
+
       - name: Install CPython 3.14 free-threaded
         uses: actions/setup-python@v6
         with:
