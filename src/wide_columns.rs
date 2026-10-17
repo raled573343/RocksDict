@@ -148,6 +148,27 @@ pub(crate) fn get_entity(
     }
 }
 
+/// Normalize the public Python API's arbitrarily ordered columns into
+/// RocksDB's strictly sorted native representation. The permutation indexes
+/// BOTH names and values, so a column never receives a different value.
+///
+/// Reject duplicates rather than silently overwriting an entry, and reject
+/// empty entities before crossing the C++ FFI boundary.
+fn sorted_column_indices(names: &[Vec<u8>], values: &[Vec<u8>]) -> PyResult<Vec<usize>> {
+    if names.len() != values.len() {
+        return Err(PyException::new_err("column names and values must have equal lengths"));
+    }
+    if names.is_empty() {
+        return Err(PyException::new_err("wide-column entity must contain at least one column"));
+    }
+    let mut order: Vec<usize> = (0..names.len()).collect();
+    order.sort_unstable_by(|&a, &b| names[a].cmp(&names[b]));
+    if order.windows(2).any(|pair| names[pair[0]] == names[pair[1]]) {
+        return Err(PyException::new_err("wide-column names must be unique"));
+    }
+    Ok(order)
+}
+
 pub(crate) fn put_entity(
     db: &DB,
     cf: &ColumnFamilyHandle,
@@ -156,23 +177,13 @@ pub(crate) fn put_entity(
     values: &[Vec<u8>],
     flags: u32,
 ) -> PyResult<()> {
-    if names.len() != values.len() {
-        return Err(PyException::new_err("column names and values must have equal lengths"));
-    }
-    // DB::PutEntity requires strictly ascending, distinct column names.
-    // Validate before FFI: invalid user input must not reach C++ assertions.
-    if names.is_empty() {
-        return Err(PyException::new_err("wide-column entity must contain at least one column"));
-    }
-    if names.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(PyException::new_err(
-            "wide-column names must be strictly sorted and unique",
-        ));
-    }
-    let n_ptrs: Vec<*const c_char> = names.iter().map(|s| s.as_ptr() as *const c_char).collect();
-    let v_ptrs: Vec<*const c_char> = values.iter().map(|s| s.as_ptr() as *const c_char).collect();
-    let n_lens: Vec<size_t> = names.iter().map(Vec::len).collect();
-    let v_lens: Vec<size_t> = values.iter().map(Vec::len).collect();
+    let order = sorted_column_indices(names, values)?;
+    let n_ptrs: Vec<*const c_char> = order.iter()
+        .map(|&i| names[i].as_ptr() as *const c_char).collect();
+    let v_ptrs: Vec<*const c_char> = order.iter()
+        .map(|&i| values[i].as_ptr() as *const c_char).collect();
+    let n_lens: Vec<size_t> = order.iter().map(|&i| names[i].len()).collect();
+    let v_lens: Vec<size_t> = order.iter().map(|&i| values[i].len()).collect();
     let mut err = null_mut();
     let status = unsafe {
         rocksdict11_put_entity(
@@ -205,19 +216,13 @@ pub(crate) fn batch_put_entity(
     names: &[Vec<u8>],
     values: &[Vec<u8>],
 ) -> PyResult<()> {
-    if names.len() != values.len() {
-        return Err(PyException::new_err("column names and values must have equal lengths"));
-    }
-    if names.is_empty() || names.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(PyException::new_err(
-            "wide-column names must be nonempty, strictly sorted and unique",
-        ));
-    }
-
-    let names_ptr: Vec<*const c_char> = names.iter().map(|b| b.as_ptr() as *const c_char).collect();
-    let values_ptr: Vec<*const c_char> = values.iter().map(|b| b.as_ptr() as *const c_char).collect();
-    let names_len: Vec<size_t> = names.iter().map(Vec::len).collect();
-    let values_len: Vec<size_t> = values.iter().map(Vec::len).collect();
+    let order = sorted_column_indices(names, values)?;
+    let names_ptr: Vec<*const c_char> = order.iter()
+        .map(|&i| names[i].as_ptr() as *const c_char).collect();
+    let values_ptr: Vec<*const c_char> = order.iter()
+        .map(|&i| values[i].as_ptr() as *const c_char).collect();
+    let names_len: Vec<size_t> = order.iter().map(|&i| names[i].len()).collect();
+    let values_len: Vec<size_t> = order.iter().map(|&i| values[i].len()).collect();
     let mut error = null_mut();
     let status = unsafe {
         rocksdict11_writebatch_put_entity(

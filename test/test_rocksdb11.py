@@ -122,19 +122,34 @@ class RocksDB11Integration(unittest.TestCase):
                 db.close()
             Rdict.destroy(db_path)
 
-    def test_invalid_wide_column_order_is_rejected(self):
-        with tempfile.TemporaryDirectory(prefix="rd11-invalid-columns-") as folder:
+    def test_unsorted_wide_columns_preserve_name_value_pairs(self):
+        from rocksdict import WriteBatch
+        with tempfile.TemporaryDirectory(prefix="rd11-unsorted-columns-") as folder:
             path = str(Path(folder) / "db")
             db = Rdict(path, Options(raw_mode=True))
             try:
-                with self.assertRaises(Exception) as invalid_order:
-                    db.put_entity(b"order", [b"z", b"a"], [b"first", b"second"])
-                self.assertIn("sorted", str(invalid_order.exception))
-                with self.assertRaises(Exception):
+                db.put_entity(b"order", [b"z", b"a"], [b"first", b"second"])
+                self.assertEqual(
+                    db.get_entity(b"order"),
+                    [(b"a", b"second"), (b"z", b"first")],
+                )
+
+                batch = WriteBatch(raw_mode=True)
+                batch.set_default_column_family(db.get_column_family_handle("default"))
+                batch.put_entity(
+                    b"batched", [b"language", b"city"],
+                    [b"Cantonese", b"Shenzhen"],
+                )
+                db.write(batch)
+                self.assertEqual(
+                    db.get_entity(b"batched"),
+                    [(b"city", b"Shenzhen"), (b"language", b"Cantonese")],
+                )
+
+                with self.assertRaisesRegex(Exception, "unique"):
                     db.put_entity(b"duplicate", [b"same", b"same"], [b"1", b"2"])
-                with self.assertRaises(Exception):
+                with self.assertRaisesRegex(Exception, "at least one"):
                     db.put_entity(b"empty", [], [])
-                self.assertIsNone(db.get_entity(b"order"))
                 db[b"plain"] = b"payload"
                 self.assertEqual(db.get_entity(b"plain"), [(b"", b"payload")])
             finally:
