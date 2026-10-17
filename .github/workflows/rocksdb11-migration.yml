@@ -72,6 +72,14 @@ jobs:
         with:
           python-version: '3.14t'
           architecture: x64
+      - name: Restore pinned host Rust 1.91.1 toolchain
+        id: host-rustup
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/1.91.1-*
+            ~/.rustup/update-hashes/1.91.1-*
+          key: host-rustup-1.91.1-${{ runner.os }}-${{ runner.arch }}-v1
       - name: Install pinned Rust compiler
         uses: dtolnay/rust-toolchain@master
         with:
@@ -156,6 +164,15 @@ jobs:
             target
           key: ${{ steps.build-cache.outputs.cache-primary-key }}
 
+      - name: Save pinned host Rust 1.91.1 toolchain even after failure
+        if: always() && steps.host-rustup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/1.91.1-*
+            ~/.rustup/update-hashes/1.91.1-*
+          key: host-rustup-1.91.1-${{ runner.os }}-${{ runner.arch }}-v1
+
   wheels:
     name: Python 3.14t RocksDB 11 wheels - ${{ matrix.platform }}
     if: (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-wheels]')) || (github.event_name == 'workflow_dispatch' && inputs.stage == 'wheels-both')
@@ -182,6 +199,14 @@ jobs:
         with:
           python-version: '3.14t'
           architecture: x64
+      - name: Restore pinned host Rust 1.91.1 toolchain
+        id: host-rustup
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/1.91.1-*
+            ~/.rustup/update-hashes/1.91.1-*
+          key: host-rustup-1.91.1-${{ runner.os }}-${{ runner.arch }}-v1
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.91.1'
@@ -233,6 +258,28 @@ jobs:
           }
           (Join-Path $llvm 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Report restored dependency and compiled object caches
+        shell: python
+        env:
+          CARGO_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+          LLVM_HIT: ${{ steps.llvm-cache.outputs.cache-hit }}
+          DNF_HIT: ${{ steps.linux-dependency-cache.outputs.cache-hit }}
+          RUSTUP_HIT: ${{ steps.host-rustup.outputs.cache-hit }}
+        run: |
+          import os
+          checks = {
+              "Cargo crates + native RocksDB objects": os.getenv("CARGO_HIT", ""),
+              "Host Rust 1.91.1 toolchain": os.getenv("RUSTUP_HIT", ""),
+              "Windows LLVM 21": os.getenv("LLVM_HIT", ""),
+              "Linux RPM + manylinux Rust": os.getenv("DNF_HIT", ""),
+          }
+          for key, hit in checks.items():
+              print(f"{key}: {hit or 'not applicable'}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("## Dependency/build cache status\\n\\n")
+              for key, hit in checks.items():
+                  f.write(f"- {key}: **{hit or 'not applicable'}**\\n")
+              f.write("\\n")
       - name: Build Linux x64 candidate wheel
         if: runner.os == 'Linux'
         uses: PyO3/maturin-action@v1
@@ -308,6 +355,15 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+      - name: Save pinned host Rust 1.91.1 toolchain even after failure
+        if: always() && steps.host-rustup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/1.91.1-*
+            ~/.rustup/update-hashes/1.91.1-*
+          key: host-rustup-1.91.1-${{ runner.os }}-${{ runner.arch }}-v1
 
   publish:
     name: Publish tested RocksDB 11.8.1 GitHub Release
