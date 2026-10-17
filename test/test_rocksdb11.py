@@ -95,6 +95,48 @@ class RocksDB11Integration(unittest.TestCase):
                 db.close()
             Rdict.destroy(db_path)
 
+    def test_invalid_wide_column_order_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="rd11-invalid-columns-") as folder:
+            path = str(Path(folder) / "db")
+            db = Rdict(path, Options(raw_mode=True))
+            try:
+                with self.assertRaises(Exception) as invalid_order:
+                    db.put_entity(b"order", [b"z", b"a"], [b"first", b"second"])
+                self.assertIn("sorted", str(invalid_order.exception))
+                with self.assertRaises(Exception):
+                    db.put_entity(b"duplicate", [b"same", b"same"], [b"1", b"2"])
+                with self.assertRaises(Exception):
+                    db.put_entity(b"empty", [], [])
+                self.assertIsNone(db.get_entity(b"order"))
+                db[b"plain"] = b"payload"
+                self.assertEqual(db.get_entity(b"plain"), [(b"", b"payload")])
+            finally:
+                db.close()
+            Rdict.destroy(path)
+
+    def test_column_family_options_reload(self):
+        with tempfile.TemporaryDirectory(prefix="rd11-cf-") as folder:
+            path = str(Path(folder) / "db")
+            opts = Options(raw_mode=True)
+            opts.create_if_missing(True)
+            opts.create_missing_column_families(True)
+            db = Rdict(path, opts)
+            try:
+                cf = db.create_column_family("data", Options(raw_mode=True))
+                cf[b"hello"] = b"world"
+                cf.close()
+            finally:
+                db.close()
+            loaded, columns = Options.load_latest(path)
+            self.assertIn("data", columns)
+            self.assertTrue(isinstance(loaded, Options))
+            reopened = Rdict(path)
+            try:
+                self.assertEqual(reopened.get_column_family("data")[b"hello"], b"world")
+            finally:
+                reopened.close()
+            Rdict.destroy(path)
+
     def test_read_snapshot_is_stable(self):
         with tempfile.TemporaryDirectory(prefix="rd11-snapshot-") as folder:
             path = str(Path(folder) / "db")

@@ -21,3 +21,10 @@ native ABI checks are enforced by `build.rs` and
 `src/rocksdb11_bridge.cc` in the main application crate.
 
 The old 9.8.4 Git submodule is removed only on the migration branch.
+
+The current Python entity bridge rejects an empty column set, duplicate
+column names and names not sorted bytewise before forwarding them to the C++
+`PutEntity` implementation. This prevents undefined expectations about
+wide-column ordering. The persisted column-family reload API uses
+`into_name_and_options` to transfer native options without reconstructing
+them from defaults.

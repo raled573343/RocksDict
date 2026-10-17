@@ -147,6 +147,16 @@ pub(crate) fn put_entity(
     if names.len() != values.len() {
         return Err(PyException::new_err("column names and values must have equal lengths"));
     }
+    // DB::PutEntity requires strictly ascending, distinct column names.
+    // Validate before FFI: invalid user input must not reach C++ assertions.
+    if names.is_empty() {
+        return Err(PyException::new_err("wide-column entity must contain at least one column"));
+    }
+    if names.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(PyException::new_err(
+            "wide-column names must be strictly sorted and unique",
+        ));
+    }
     let n_ptrs: Vec<*const c_char> = names.iter().map(|s| s.as_ptr() as *const c_char).collect();
     let v_ptrs: Vec<*const c_char> = values.iter().map(|s| s.as_ptr() as *const c_char).collect();
     let n_lens: Vec<size_t> = names.iter().map(Vec::len).collect();
