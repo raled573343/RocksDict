@@ -1,6 +1,6 @@
 [package]
 name = "RocksDict"
-version = "0.3.29"
+version = "0.3.29+rocksdb11.8.1"
 edition = "2021"
 description = "Rocksdb Python Binding"
 
