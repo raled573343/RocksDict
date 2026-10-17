@@ -121,3 +121,42 @@ Aliases retain the Rust import names `rocksdb` / `librocksdb_sys`, but **do not*
 **Review (ChatGPT):** inspect actual code diff and compilation output, reject stubs/no-op and unsupported compatibility claims, accept the native upgrade only when all gates pass.
 
 **GitHub Issues note:** this repository currently has Issues disabled (GitHub API returned HTTP 410). This file serves as the durable task specification until Issues is enabled. Do not enable repository settings without explicit owner approval.
+
+
+## Implementation checkpoint — 2026-10-17 (source-only phase)
+
+**Current state:** source port is being populated and reviewed in small
+commits. **No new native build has been started since the manual-only trigger
+was installed.** Do not merge or publish yet.
+
+Implemented in this branch:
+- Vendored complete Rust wrapper `rust-rocksdb 0.53.0`, paired with one native
+  sys crate `rust-librocksdb-sys 0.48.1+11.8.1`; removed old native gitlink.
+- Retained exact OPTIONS-file column-family configuration using a minimal
+  consuming wrapper accessor.
+- Added lifetime-safe owning column-family handles with native refcounts.
+- Added a narrow C++11.8 bridge for `GetEntity`, `PutEntity`,
+  `Iterator::columns`, compile-time native-version assertion and Python
+  `native_rocksdb_version()`.
+- Made iterator key/value buffers copied while mutex is held, including empty
+  binary keys. Held snapshot ownership for iterators after the Snapshot object
+  is destroyed. Kept prefix bound buffers alive.
+- Updated open-with-TTL signature to `Duration` with negative-input rejection.
+- Exposed native 11.x read-executor, background OPTIONS cleanup,
+  flush-listener wait, selected external SST ingest controls, and
+  `Rdict.verify_file_checksums()`.
+- Added Python stubs and regression tests for those behaviors.
+
+**Before any build attempts:** reconcile the migration `Cargo.lock`. The
+GitHub candidate workflow currently generates a fresh lockfile before
+compilation; the committed lockfile is still the old RocksDB-9 generation and
+must not be treated as a reproducible RocksDB-11 lock. Once resolved, run only
+the manually selected `check-linux` stage first to obtain concrete compiler
+errors; fix those in source before `wheels-both`. The previous diagnostic run
+#39027278753 failed before Rust type checking due to a missing
+`LIBCLANG_PATH`; its workflow setup was fixed. This does **not** establish
+successful Rust/C++ compilation of the new code.
+
+**Release safety:** existing `main`, daily upstream-version builder and
+`cp314t-v0.3.29` remain separate and unchanged by this branch. No destructive
+production database migration.
