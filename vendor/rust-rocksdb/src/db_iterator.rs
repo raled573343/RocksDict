@@ -1,0 +1,907 @@
+// Copyright 2020 Tyler Neely
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::{
+    Error, ReadOptions, WriteBatch,
+    db::{DB, DBAccess},
+    ffi,
+};
+use libc::{c_char, c_uchar, size_t};
+use std::mem::ManuallyDrop;
+use std::sync::Arc;
+use std::{marker::PhantomData, ops::ControlFlow, slice};
+
+/// A type alias to keep compatibility. See [`DBRawIteratorWithThreadMode`] for details
+pub type DBRawIterator<'a> = DBRawIteratorWithThreadMode<'a, DB>;
+
+/// Keeps an iterator's [`ReadOptions`] alive for as long as the iterator is.
+///
+/// `rocksdb_create_iterators` builds N iterators from one options object, so
+/// that case needs a shared owner. Every other constructor makes one iterator
+/// from one options object and keeps it outright, which costs nothing.
+pub(crate) enum IterReadOptions {
+    Owned(ReadOptions),
+    Shared(Arc<ReadOptions>),
+}
+
+impl IterReadOptions {
+    #[inline]
+    pub(crate) fn as_ptr(&self) -> *mut ffi::rocksdb_readoptions_t {
+        match self {
+            Self::Owned(readopts) => readopts.inner,
+            Self::Shared(readopts) => readopts.inner,
+        }
+    }
+}
+
+impl From<ReadOptions> for IterReadOptions {
+    fn from(readopts: ReadOptions) -> Self {
+        Self::Owned(readopts)
+    }
+}
+
+impl From<Arc<ReadOptions>> for IterReadOptions {
+    fn from(readopts: Arc<ReadOptions>) -> Self {
+        Self::Shared(readopts)
+    }
+}
+
+/// A low-level iterator over a database or column family, created by [`DB::raw_iterator`]
+/// and other `raw_iterator_*` methods.
+///
+/// This iterator replicates RocksDB's API. It should provide better
+/// performance and more features than [`DBIteratorWithThreadMode`], which is a standard
+/// Rust [`std::iter::Iterator`].
+///
+/// ```
+/// use rust_rocksdb::{DB, Options};
+///
+/// let tempdir = tempfile::Builder::new()
+///     .prefix("_path_for_rocksdb_storage4")
+///     .tempdir()
+///     .expect("Failed to create temporary path for the _path_for_rocksdb_storage4.");
+/// let path = tempdir.path();
+/// {
+///     let db = DB::open_default(path).unwrap();
+///     let mut iter = db.raw_iterator();
+///
+///     // Forwards iteration
+///     iter.seek_to_first();
+///     while iter.valid() {
+///         println!("Saw {:?} {:?}", iter.key(), iter.value());
+///         iter.next();
+///     }
+///
+///     // Reverse iteration
+///     iter.seek_to_last();
+///     while iter.valid() {
+///         println!("Saw {:?} {:?}", iter.key(), iter.value());
+///         iter.prev();
+///     }
+///
+///     // Seeking
+///     iter.seek(b"my key");
+///     while iter.valid() {
+///         println!("Saw {:?} {:?}", iter.key(), iter.value());
+///         iter.next();
+///     }
+///
+///     // Reverse iteration from key
+///     // Note, use seek_for_prev when reversing because if this key doesn't exist,
+///     // this will make the iterator start from the previous key rather than the next.
+///     iter.seek_for_prev(b"my key");
+///     while iter.valid() {
+///         println!("Saw {:?} {:?}", iter.key(), iter.value());
+///         iter.prev();
+///     }
+/// }
+/// let _ = DB::destroy(&Options::default(), path);
+/// ```
+pub struct DBRawIteratorWithThreadMode<'a, D: DBAccess> {
+    inner: std::ptr::NonNull<ffi::rocksdb_iterator_t>,
+
+    /// When iterate_lower_bound or iterate_upper_bound are set, the inner
+    /// C iterator keeps a pointer to the upper bound inside `_readopts`.
+    /// Storing this makes sure the upper bound is always alive when the
+    /// iterator is being used.
+    ///
+    /// And yes, we need to store the entire ReadOptions structure since C++
+    /// ReadOptions keep reference to C rocksdb_readoptions_t wrapper which
+    /// point to vectors we own.  See issue #660.
+    ///
+    /// This is deliberately not an `Option`. An iterator without its options
+    /// is the bug in issue #660, so the type does not let one be built.
+    readopts: IterReadOptions,
+
+    db: PhantomData<&'a D>,
+}
+
+impl<'a, D: DBAccess> DBRawIteratorWithThreadMode<'a, D> {
+    /// Unlike [`new_cf`](Self::new_cf), the `db` borrow is not tied to `'a`.
+    /// That is what lets [`OwnedPrefixProber::with_opts`](crate::OwnedPrefixProber::with_opts)
+    /// build a `'static` iterator, so tying it would break that caller.
+    pub(crate) fn new(db: &D, readopts: ReadOptions) -> Self {
+        let inner = unsafe { db.create_iterator(&readopts) };
+        Self::from_inner(inner, readopts)
+    }
+
+    pub(crate) fn new_cf(
+        db: &'a D,
+        cf_handle: *mut ffi::rocksdb_column_family_handle_t,
+        readopts: ReadOptions,
+    ) -> Self {
+        let inner = unsafe { db.create_iterator_cf(cf_handle, &readopts) };
+        Self::from_inner(inner, readopts)
+    }
+
+    /// Same as [`new_cf`](Self::new_cf), but the returned iterator's lifetime
+    /// parameter is not tied to the `db` borrow.
+    ///
+    /// Keeping `db` alive for at least as long as the iterator becomes the
+    /// caller's job, normally by holding an `Arc<D>` next to it and dropping
+    /// the iterator first. Prefer `new_cf` unless you are building an owning
+    /// wrapper such as [`OwnedPrefixProber`](crate::OwnedPrefixProber).
+    pub(crate) fn new_cf_detached(
+        db: &D,
+        cf_handle: *mut ffi::rocksdb_column_family_handle_t,
+        readopts: ReadOptions,
+    ) -> Self {
+        let inner = unsafe { db.create_iterator_cf(cf_handle, &readopts) };
+        Self::from_inner(inner, readopts)
+    }
+
+    pub(crate) fn from_inner(
+        inner: *mut ffi::rocksdb_iterator_t,
+        readopts: impl Into<IterReadOptions>,
+    ) -> Self {
+        // This unwrap will never fail since rocksdb_create_iterator and
+        // rocksdb_create_iterator_cf functions always return non-null. They
+        // use new and deference the result so any nulls would end up with SIGSEGV
+        // there and we would have a bigger issue.
+        let inner = std::ptr::NonNull::new(inner).unwrap();
+        Self {
+            inner,
+            readopts: readopts.into(),
+            db: PhantomData,
+        }
+    }
+
+    pub(crate) fn into_inner(
+        self,
+    ) -> (std::ptr::NonNull<ffi::rocksdb_iterator_t>, IterReadOptions) {
+        let value = ManuallyDrop::new(self);
+        // SAFETY: value won't be used beyond this point
+        let inner = unsafe { std::ptr::read(&raw const value.inner) };
+        let readopts = unsafe { std::ptr::read(&raw const value.readopts) };
+
+        (inner, readopts)
+    }
+
+    /// The options object this iterator was created from, for tests that need
+    /// to assert which iterators share one owner.
+    #[cfg(test)]
+    pub(crate) fn readopts_ptr(&self) -> *mut ffi::rocksdb_readoptions_t {
+        self.readopts.as_ptr()
+    }
+
+    /// Returns `true` if the iterator is valid. An iterator is invalidated when
+    /// it reaches the end of its defined range, or when it encounters an error.
+    ///
+    /// To check whether the iterator encountered an error after `valid` has
+    /// returned `false`, use the [`status`](DBRawIteratorWithThreadMode::status) method. `status` will never
+    /// return an error when `valid` is `true`.
+    pub fn valid(&self) -> bool {
+        unsafe { ffi::rocksdb_iter_valid(self.inner.as_ptr()) != 0 }
+    }
+
+    /// Returns an error `Result` if the iterator has encountered an error
+    /// during operation. When an error is encountered, the iterator is
+    /// invalidated and [`valid`](DBRawIteratorWithThreadMode::valid) will return `false` when called.
+    ///
+    /// Performing a seek will discard the current status.
+    pub fn status(&self) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_iter_get_error(self.inner.as_ptr()));
+        }
+        Ok(())
+    }
+
+    /// Refreshes the iterator to represent the latest state of the DB.
+    /// The iterator is invalidated after this call and must be re-sought
+    /// before use.
+    ///
+    /// If the iterator was created with a snapshot, the refreshed iterator
+    /// will no longer use that snapshot and will instead read the latest
+    /// DB state. The snapshot itself is not released; it remains valid and
+    /// will be released when the owning [`crate::SnapshotWithThreadMode`] is dropped.
+    pub fn refresh(&mut self) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_iter_refresh(self.inner.as_ptr()));
+        }
+        Ok(())
+    }
+
+    /// Seeks to the first key in the database.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rust_rocksdb::{DB, Options};
+    ///
+    /// let tempdir = tempfile::Builder::new()
+    ///     .prefix("_path_for_rocksdb_storage5")
+    ///     .tempdir()
+    ///     .expect("Failed to create temporary path for the _path_for_rocksdb_storage5.");
+    /// let path = tempdir.path();
+    /// {
+    ///     let db = DB::open_default(path).unwrap();
+    ///     let mut iter = db.raw_iterator();
+    ///
+    ///     // Iterate all keys from the start in lexicographic order
+    ///     iter.seek_to_first();
+    ///
+    ///     while iter.valid() {
+    ///         println!("{:?} {:?}", iter.key(), iter.value());
+    ///         iter.next();
+    ///     }
+    ///
+    ///     // Read just the first key
+    ///     iter.seek_to_first();
+    ///
+    ///     if iter.valid() {
+    ///         println!("{:?} {:?}", iter.key(), iter.value());
+    ///     } else {
+    ///         // There are no keys in the database
+    ///     }
+    /// }
+    /// let _ = DB::destroy(&Options::default(), path);
+    /// ```
+    pub fn seek_to_first(&mut self) {
+        unsafe {
+            ffi::rocksdb_iter_seek_to_first(self.inner.as_ptr());
+        }
+    }
+
+    /// Seeks to the last key in the database.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rust_rocksdb::{DB, Options};
+    ///
+    /// let tempdir = tempfile::Builder::new()
+    ///     .prefix("_path_for_rocksdb_storage6")
+    ///     .tempdir()
+    ///     .expect("Failed to create temporary path for the _path_for_rocksdb_storage6.");
+    /// let path = tempdir.path();
+    /// {
+    ///     let db = DB::open_default(path).unwrap();
+    ///     let mut iter = db.raw_iterator();
+    ///
+    ///     // Iterate all keys from the end in reverse lexicographic order
+    ///     iter.seek_to_last();
+    ///
+    ///     while iter.valid() {
+    ///         println!("{:?} {:?}", iter.key(), iter.value());
+    ///         iter.prev();
+    ///     }
+    ///
+    ///     // Read just the last key
+    ///     iter.seek_to_last();
+    ///
+    ///     if iter.valid() {
+    ///         println!("{:?} {:?}", iter.key(), iter.value());
+    ///     } else {
+    ///         // There are no keys in the database
+    ///     }
+    /// }
+    /// let _ = DB::destroy(&Options::default(), path);
+    /// ```
+    pub fn seek_to_last(&mut self) {
+        unsafe {
+            ffi::rocksdb_iter_seek_to_last(self.inner.as_ptr());
+        }
+    }
+
+    /// Seeks to the specified key or the first key that lexicographically follows it.
+    ///
+    /// This method will attempt to seek to the specified key. If that key does not exist, it will
+    /// find and seek to the key that lexicographically follows it instead.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rust_rocksdb::{DB, Options};
+    ///
+    /// let tempdir = tempfile::Builder::new()
+    ///     .prefix("_path_for_rocksdb_storage7")
+    ///     .tempdir()
+    ///     .expect("Failed to create temporary path for the _path_for_rocksdb_storage7.");
+    /// let path = tempdir.path();
+    /// {
+    ///     let db = DB::open_default(path).unwrap();
+    ///     let mut iter = db.raw_iterator();
+    ///
+    ///     // Read the first key that starts with 'a'
+    ///     iter.seek(b"a");
+    ///
+    ///     if iter.valid() {
+    ///         println!("{:?} {:?}", iter.key(), iter.value());
+    ///     } else {
+    ///         // There are no keys in the database
+    ///     }
+    /// }
+    /// let _ = DB::destroy(&Options::default(), path);
+    /// ```
+    pub fn seek<K: AsRef<[u8]>>(&mut self, key: K) {
+        let key = key.as_ref();
+
+        unsafe {
+            ffi::rocksdb_iter_seek(
+                self.inner.as_ptr(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+            );
+        }
+    }
+
+    /// Seeks to the specified key, or the first key that lexicographically precedes it.
+    ///
+    /// Like ``.seek()`` this method will attempt to seek to the specified key.
+    /// The difference with ``.seek()`` is that if the specified key do not exist, this method will
+    /// seek to key that lexicographically precedes it instead.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rust_rocksdb::{DB, Options};
+    ///
+    /// let tempdir = tempfile::Builder::new()
+    ///     .prefix("_path_for_rocksdb_storage8")
+    ///     .tempdir()
+    ///     .expect("Failed to create temporary path for the _path_for_rocksdb_storage8.");
+    /// let path = tempdir.path();
+    /// {
+    ///     let db = DB::open_default(path).unwrap();
+    ///     let mut iter = db.raw_iterator();
+    ///
+    ///     // Read the last key that starts with 'a'
+    ///     iter.seek_for_prev(b"b");
+    ///
+    ///     if iter.valid() {
+    ///         println!("{:?} {:?}", iter.key(), iter.value());
+    ///     } else {
+    ///         // There are no keys in the database
+    ///     }
+    /// }
+    /// let _ = DB::destroy(&Options::default(), path);
+    /// ```
+    pub fn seek_for_prev<K: AsRef<[u8]>>(&mut self, key: K) {
+        let key = key.as_ref();
+
+        unsafe {
+            ffi::rocksdb_iter_seek_for_prev(
+                self.inner.as_ptr(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+            );
+        }
+    }
+
+    /// Seeks to the next key.
+    pub fn next(&mut self) {
+        if self.valid() {
+            // SAFETY: The validity check above guarantees that RocksDB permits
+            // advancing the iterator.
+            unsafe { self.next_unchecked() }
+        }
+    }
+
+    /// Advances to the next key without checking iterator validity.
+    ///
+    /// # Safety
+    ///
+    /// The iterator must be valid.
+    #[inline]
+    unsafe fn next_unchecked(&mut self) {
+        unsafe {
+            ffi::rocksdb_iter_next(self.inner.as_ptr());
+        }
+    }
+
+    /// Seeks to the previous key.
+    pub fn prev(&mut self) {
+        if self.valid() {
+            // SAFETY: The validity check above guarantees that RocksDB permits
+            // advancing the iterator.
+            unsafe { self.prev_unchecked() }
+        }
+    }
+
+    /// Advances to the previous key without checking iterator validity.
+    ///
+    /// # Safety
+    ///
+    /// The iterator must be valid.
+    #[inline]
+    unsafe fn prev_unchecked(&mut self) {
+        unsafe {
+            ffi::rocksdb_iter_prev(self.inner.as_ptr());
+        }
+    }
+
+    /// Returns a slice of the current key.
+    pub fn key(&self) -> Option<&[u8]> {
+        if self.valid() {
+            // SAFETY: We just checked that the iterator is valid.
+            Some(unsafe { self.key_impl() })
+        } else {
+            None
+        }
+    }
+
+    /// Returns a slice of the current value.
+    pub fn value(&self) -> Option<&[u8]> {
+        if self.valid() {
+            // SAFETY: We just checked that the iterator is valid.
+            Some(unsafe { self.value_impl() })
+        } else {
+            None
+        }
+    }
+
+    /// Returns pair with slice of the current key and current value.
+    pub fn item(&self) -> Option<(&[u8], &[u8])> {
+        if self.valid() {
+            // SAFETY: We just checked that the iterator is valid.
+            Some(unsafe { (self.key_impl(), self.value_impl()) })
+        } else {
+            None
+        }
+    }
+
+    /// Returns a slice of the current key.
+    ///
+    /// # Safety
+    ///
+    /// The iterator must be valid (i.e., `valid()` returns true). Calling this
+    /// method when the iterator is invalid is undefined behavior, as RocksDB
+    /// may return an invalid pointer.
+    ///
+    /// Uses `rocksdb_iter_key_slice` which returns a `rocksdb_slice_t` by value,
+    /// avoiding the overhead of output parameters compared to `rocksdb_iter_key`.
+    #[inline]
+    unsafe fn key_impl(&self) -> &[u8] {
+        unsafe {
+            let slice = ffi::rocksdb_iter_key_slice(self.inner.as_ptr());
+            if slice.size == 0 {
+                // Empty keys and values are legal in RocksDB, and
+                // `slice::from_raw_parts` requires a dereferenceable pointer
+                // even for a zero length, so do not build a slice from
+                // whatever `data` happens to be.
+                return &[];
+            }
+            slice::from_raw_parts(slice.data as *const c_uchar, slice.size)
+        }
+    }
+
+    /// Returns a slice of the current value.
+    ///
+    /// # Safety
+    ///
+    /// The iterator must be valid (i.e., `valid()` returns true). Calling this
+    /// method when the iterator is invalid is undefined behavior, as RocksDB
+    /// may return an invalid pointer.
+    ///
+    /// Uses `rocksdb_iter_value_slice` which returns a `rocksdb_slice_t` by value,
+    /// avoiding the overhead of output parameters compared to `rocksdb_iter_value`.
+    #[inline]
+    unsafe fn value_impl(&self) -> &[u8] {
+        unsafe {
+            let slice = ffi::rocksdb_iter_value_slice(self.inner.as_ptr());
+            if slice.size == 0 {
+                // Empty keys and values are legal in RocksDB, and
+                // `slice::from_raw_parts` requires a dereferenceable pointer
+                // even for a zero length, so do not build a slice from
+                // whatever `data` happens to be.
+                return &[];
+            }
+            slice::from_raw_parts(slice.data as *const c_uchar, slice.size)
+        }
+    }
+
+    /// Returns a slice of the current entry's timestamp.
+    pub fn timestamp(&self) -> Option<&[u8]> {
+        if self.valid() {
+            // SAFETY: We just checked that the iterator is valid.
+            Some(unsafe { self.timestamp_unchecked() })
+        } else {
+            None
+        }
+    }
+
+    /// Returns the timestamp of the current entry without checking iterator validity.
+    ///
+    /// # Safety
+    ///
+    /// The iterator must be valid (i.e., `valid()` returns true). Calling this
+    /// method when the iterator is invalid is undefined behavior, as RocksDB
+    /// may return an invalid pointer.
+    ///
+    /// Uses `rocksdb_iter_timestamp_slice` which returns a `rocksdb_slice_t` by value,
+    /// avoiding the overhead of output parameters compared to `rocksdb_iter_timestamp`.
+    pub unsafe fn timestamp_unchecked(&self) -> &[u8] {
+        unsafe {
+            let slice = ffi::rocksdb_iter_timestamp_slice(self.inner.as_ptr());
+            if slice.size == 0 {
+                return &[];
+            }
+            slice::from_raw_parts(slice.data as *const c_uchar, slice.size)
+        }
+    }
+}
+
+impl<D: DBAccess> Drop for DBRawIteratorWithThreadMode<'_, D> {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_iter_destroy(self.inner.as_ptr());
+        }
+    }
+}
+
+unsafe impl<D: DBAccess> Send for DBRawIteratorWithThreadMode<'_, D> {}
+unsafe impl<D: DBAccess> Sync for DBRawIteratorWithThreadMode<'_, D> {}
+
+/// A type alias to keep compatibility. See [`DBIteratorWithThreadMode`] for details
+pub type DBIterator<'a> = DBIteratorWithThreadMode<'a, DB>;
+
+/// A standard Rust [`Iterator`] over a database or column family.
+///
+/// As an alternative, [`DBRawIteratorWithThreadMode`] is a low level wrapper around
+/// RocksDB's API, which can provide better performance and more features.
+///
+/// ```
+/// use rust_rocksdb::{DB, Direction, IteratorMode, Options};
+///
+/// let tempdir = tempfile::Builder::new()
+///     .prefix("_path_for_rocksdb_storage2")
+///     .tempdir()
+///     .expect("Failed to create temporary path for the _path_for_rocksdb_storage2.");
+/// let path = tempdir.path();
+/// {
+///     let db = DB::open_default(path).unwrap();
+///     let mut iter = db.iterator(IteratorMode::Start); // Always iterates forward
+///     for item in iter {
+///         let (key, value) = item.unwrap();
+///         println!("Saw {:?} {:?}", key, value);
+///     }
+///     iter = db.iterator(IteratorMode::End);  // Always iterates backward
+///     for item in iter {
+///         let (key, value) = item.unwrap();
+///         println!("Saw {:?} {:?}", key, value);
+///     }
+///     iter = db.iterator(IteratorMode::From(b"my key", Direction::Forward)); // From a key in Direction::{forward,reverse}
+///     for item in iter {
+///         let (key, value) = item.unwrap();
+///         println!("Saw {:?} {:?}", key, value);
+///     }
+///
+///     // You can seek with an existing Iterator instance, too
+///     iter = db.iterator(IteratorMode::Start);
+///     iter.set_mode(IteratorMode::From(b"another key", Direction::Reverse));
+///     for item in iter {
+///         let (key, value) = item.unwrap();
+///         println!("Saw {:?} {:?}", key, value);
+///     }
+/// }
+/// let _ = DB::destroy(&Options::default(), path);
+/// ```
+///
+/// An iterator must not outlive the `DB` it iterates over:
+///
+/// ```compile_fail,E0597
+/// use rust_rocksdb::{IteratorMode, DB};
+///
+/// let _iter = {
+///     let db = DB::open_default("foo").unwrap();
+///     db.iterator(IteratorMode::Start)
+/// };
+/// ```
+pub struct DBIteratorWithThreadMode<'a, D: DBAccess> {
+    raw: DBRawIteratorWithThreadMode<'a, D>,
+    direction: Direction,
+    done: bool,
+}
+
+#[derive(Copy, Clone)]
+pub enum Direction {
+    Forward,
+    Reverse,
+}
+
+pub type KVBytes = (Box<[u8]>, Box<[u8]>);
+
+#[derive(Copy, Clone)]
+pub enum IteratorMode<'a> {
+    Start,
+    End,
+    From(&'a [u8], Direction),
+}
+
+impl<'a, D: DBAccess> DBIteratorWithThreadMode<'a, D> {
+    pub(crate) fn new(db: &D, readopts: ReadOptions, mode: IteratorMode) -> Self {
+        Self::from_raw(DBRawIteratorWithThreadMode::new(db, readopts), mode)
+    }
+
+    pub(crate) fn new_cf(
+        db: &'a D,
+        cf_handle: *mut ffi::rocksdb_column_family_handle_t,
+        readopts: ReadOptions,
+        mode: IteratorMode,
+    ) -> Self {
+        Self::from_raw(
+            DBRawIteratorWithThreadMode::new_cf(db, cf_handle, readopts),
+            mode,
+        )
+    }
+
+    fn from_raw(raw: DBRawIteratorWithThreadMode<'a, D>, mode: IteratorMode) -> Self {
+        let mut rv = DBIteratorWithThreadMode {
+            raw,
+            direction: Direction::Forward, // blown away by set_mode()
+            done: false,
+        };
+        rv.set_mode(mode);
+        rv
+    }
+
+    pub fn set_mode(&mut self, mode: IteratorMode) {
+        self.done = false;
+        self.direction = match mode {
+            IteratorMode::Start => {
+                self.raw.seek_to_first();
+                Direction::Forward
+            }
+            IteratorMode::End => {
+                self.raw.seek_to_last();
+                Direction::Reverse
+            }
+            IteratorMode::From(key, Direction::Forward) => {
+                self.raw.seek(key);
+                Direction::Forward
+            }
+            IteratorMode::From(key, Direction::Reverse) => {
+                self.raw.seek_for_prev(key);
+                Direction::Reverse
+            }
+        };
+    }
+
+    /// Refreshes the iterator, then re-seeks using the given mode.
+    ///
+    /// After a refresh the underlying iterator is invalidated, so a mode
+    /// must be provided to reposition it.
+    pub fn refresh(&mut self, mode: IteratorMode) -> Result<(), Error> {
+        self.raw.refresh()?;
+        self.set_mode(mode);
+        Ok(())
+    }
+
+    /// Visits the remaining entries without allocating key or value buffers.
+    ///
+    /// The key and value slices are valid only for the duration of each callback.
+    /// Returning [`ControlFlow::Break`] stops the scan after consuming the current
+    /// entry. The iterator can then resume at the following entry. Callback errors
+    /// and RocksDB iterator errors are returned through `E`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::ops::ControlFlow;
+    ///
+    /// use rust_rocksdb::{DB, Error, IteratorMode};
+    ///
+    /// # let tempdir = tempfile::tempdir().unwrap();
+    /// let db = DB::open_default(tempdir.path()).unwrap();
+    /// db.put(b"k1", b"value").unwrap();
+    ///
+    /// let mut total_bytes = 0;
+    /// let mut iter = db.iterator(IteratorMode::Start);
+    /// let outcome: Result<ControlFlow<()>, Error> = iter.try_for_each_ref(|key, value| {
+    ///     total_bytes += key.len() + value.len();
+    ///     Ok(ControlFlow::Continue(()))
+    /// });
+    ///
+    /// assert!(matches!(outcome, Ok(ControlFlow::Continue(()))));
+    /// assert_eq!(total_bytes, 7);
+    /// ```
+    ///
+    /// Borrowed entries cannot escape the callback:
+    ///
+    /// ```compile_fail,E0521
+    /// use std::ops::ControlFlow;
+    ///
+    /// use rust_rocksdb::{DB, Error, IteratorMode};
+    ///
+    /// # let tempdir = tempfile::tempdir().unwrap();
+    /// let db = DB::open_default(tempdir.path()).unwrap();
+    /// let mut iter = db.iterator(IteratorMode::Start);
+    /// let mut saved_key = None;
+    ///
+    /// let _: Result<ControlFlow<()>, Error> = iter.try_for_each_ref(|key, _| {
+    ///     saved_key = Some(key);
+    ///     Ok(ControlFlow::Break(()))
+    /// });
+    /// ```
+    #[inline]
+    pub fn try_for_each_ref<B, E, F>(&mut self, mut visit: F) -> Result<ControlFlow<B>, E>
+    where
+        E: From<Error>,
+        F: FnMut(&[u8], &[u8]) -> Result<ControlFlow<B>, E>,
+    {
+        loop {
+            let item = self
+                .next_with(|key, value| visit(key, value))
+                .map_err(E::from)?;
+            match item {
+                Some(Ok(ControlFlow::Continue(()))) => {}
+                Some(Ok(ControlFlow::Break(value))) => return Ok(ControlFlow::Break(value)),
+                Some(Err(error)) => return Err(error),
+                None => return Ok(ControlFlow::Continue(())),
+            }
+        }
+    }
+
+    #[inline]
+    fn next_with<T>(&mut self, visit: impl FnOnce(&[u8], &[u8]) -> T) -> Result<Option<T>, Error> {
+        if self.done {
+            return Ok(None);
+        }
+
+        let Some((key, value)) = self.raw.item() else {
+            self.done = true;
+            self.raw.status()?;
+            return Ok(None);
+        };
+
+        let item = visit(key, value);
+        // SAFETY: `raw.item()` returned an entry, which proves that the
+        // iterator is valid until it is advanced.
+        unsafe { self.advance_unchecked() };
+        Ok(Some(item))
+    }
+
+    /// Advances in the configured direction without checking iterator validity.
+    ///
+    /// # Safety
+    ///
+    /// The raw iterator must be valid.
+    #[inline]
+    unsafe fn advance_unchecked(&mut self) {
+        match self.direction {
+            Direction::Forward => unsafe { self.raw.next_unchecked() },
+            Direction::Reverse => unsafe { self.raw.prev_unchecked() },
+        }
+    }
+}
+
+impl<D: DBAccess> Iterator for DBIteratorWithThreadMode<'_, D> {
+    type Item = Result<KVBytes, Error>;
+
+    fn next(&mut self) -> Option<Result<KVBytes, Error>> {
+        match self.next_with(|key, value| (Box::from(key), Box::from(value))) {
+            Ok(Some(item)) => Some(Ok(item)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }
+}
+
+impl<D: DBAccess> std::iter::FusedIterator for DBIteratorWithThreadMode<'_, D> {}
+
+impl<'a, D: DBAccess> Into<DBRawIteratorWithThreadMode<'a, D>> for DBIteratorWithThreadMode<'a, D> {
+    fn into(self) -> DBRawIteratorWithThreadMode<'a, D> {
+        self.raw
+    }
+}
+
+/// Iterates the batches of writes since a given sequence number.
+///
+/// `DBWALIterator` is returned by `DB::get_updates_since()` and will return the
+/// batches of write operations that have occurred since a given sequence number
+/// (see `DB::latest_sequence_number()`). This iterator cannot be constructed by
+/// the application.
+///
+/// The iterator item type is a tuple of (`u64`, `WriteBatch`) where the first
+/// value is the sequence number of the associated write batch.
+///
+pub struct DBWALIterator {
+    pub(crate) inner: *mut ffi::rocksdb_wal_iterator_t,
+    pub(crate) start_seq_number: u64,
+}
+
+impl DBWALIterator {
+    /// Returns `true` if the iterator is valid. An iterator is invalidated when
+    /// it reaches the end of its defined range, or when it encounters an error.
+    ///
+    /// To check whether the iterator encountered an error after `valid` has
+    /// returned `false`, use the [`status`](DBWALIterator::status) method.
+    /// `status` will never return an error when `valid` is `true`.
+    pub fn valid(&self) -> bool {
+        unsafe { ffi::rocksdb_wal_iter_valid(self.inner) != 0 }
+    }
+
+    /// Returns an error `Result` if the iterator has encountered an error
+    /// during operation. When an error is encountered, the iterator is
+    /// invalidated and [`valid`](DBWALIterator::valid) will return `false` when
+    /// called.
+    pub fn status(&self) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_wal_iter_status(self.inner));
+        }
+        Ok(())
+    }
+}
+
+impl Iterator for DBWALIterator {
+    type Item = Result<(u64, WriteBatch), Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.valid() {
+            return None;
+        }
+
+        let mut seq: u64 = 0;
+        let mut batch = WriteBatch {
+            inner: unsafe { ffi::rocksdb_wal_iter_get_batch(self.inner, &raw mut seq) },
+        };
+
+        // if the initial sequence number is what was requested we skip it to
+        // only provide changes *after* it
+        while seq <= self.start_seq_number {
+            unsafe {
+                ffi::rocksdb_wal_iter_next(self.inner);
+            }
+
+            if !self.valid() {
+                return None;
+            }
+
+            // this drops which in turn frees the skipped batch
+            batch = WriteBatch {
+                inner: unsafe { ffi::rocksdb_wal_iter_get_batch(self.inner, &raw mut seq) },
+            };
+        }
+
+        if !self.valid() {
+            return self.status().err().map(Result::Err);
+        }
+
+        // Seek to the next write batch.
+        // Note that WriteBatches live independently of the WAL iterator so this is safe to do
+        unsafe {
+            ffi::rocksdb_wal_iter_next(self.inner);
+        }
+
+        Some(Ok((seq, batch)))
+    }
+}
+
+impl Drop for DBWALIterator {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_wal_iter_destroy(self.inner);
+        }
+    }
+}
