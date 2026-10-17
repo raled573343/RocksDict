@@ -4,7 +4,7 @@ use crate::exceptions::DbClosedError;
 use crate::util::error_message;
 use crate::{ReadOpt, ReadOptionsPy};
 use core::slice;
-use libc::{c_char, c_uchar, size_t};
+use libc::{c_char, size_t};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
@@ -291,58 +291,61 @@ impl RdictIter {
         }
     }
 
-    /// Returns the current key.
-    pub fn key<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        if self.valid() {
-            // Safety Note: This is safe as all methods that may invalidate the buffer returned
-            // take `&mut self`, so borrow checker will prevent use of buffer after seek.
-            unsafe {
-                let mut key_len: size_t = 0;
-                let key_len_ptr: *mut size_t = &mut key_len;
-                let key_ptr =
-                    librocksdb_sys::rocksdb_iter_key(*self.inner.lock().unwrap(), key_len_ptr)
-                        as *const c_uchar;
-                let key = slice::from_raw_parts(key_ptr, key_len);
-                Ok(decode_value(py, key, &self.loads, self.raw_mode)?)
-            }
-        } else {
-            Ok(py.None().bind(py).to_owned())
-        }
-    }
-
-    /// Returns the current value.
-    pub fn value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        if self.valid() {
-            // Safety Note: This is safe as all methods that may invalidate the buffer returned
-            // take `&mut self`, so borrow checker will prevent use of buffer after seek.
-            unsafe {
-                let mut val_len: size_t = 0;
-                let val_len_ptr: *mut size_t = &mut val_len;
-                let val_ptr =
-                    librocksdb_sys::rocksdb_iter_value(*self.inner.lock().unwrap(), val_len_ptr)
-                        as *const c_uchar;
-                let value = slice::from_raw_parts(val_ptr, val_len);
-                Ok(decode_value(py, value, &self.loads, self.raw_mode)?)
-            }
-        } else {
-            Ok(py.None().bind(py).to_owned())
-        }
-    }
-
-    /// Returns the current wide-column.
+    /// Copy the current buffer while holding the iterator mutex.
     ///
-    /// Returns:
-    ///    A list of `(name, value)` tuples.
-    ///    If the value is not an entity, returns a single-column
-    ///    with default column name (empty bytes/string).
-    ///    None or default value if the key does not exist.
-    pub fn columns<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        if !self.valid() {
-            return Ok(py.None().bind(py).to_owned());
+    /// The C API returns non-owning memory invalidated by Seek/Next/Prev;
+    /// never release the lock before copying it or decode arbitrary Python
+    /// objects while holding an internal RocksDB lock.
+    fn copy_buffer(&self, key: bool) -> PyResult<Option<Vec<u8>>> {
+        let guard = self.inner.lock().unwrap();
+        let iter = *guard;
+        if unsafe { librocksdb_sys::rocksdb_iter_valid(iter) } == 0 {
+            return Ok(None);
         }
-        // Native iterator lock protects the pointer for the full C++ copy.
-        let inner = self.inner.lock().unwrap();
-        let columns = crate::wide_columns::iterator_columns(*inner)?;
+        let mut len: size_t = 0;
+        let ptr = unsafe {
+            if key {
+                librocksdb_sys::rocksdb_iter_key(iter, &mut len)
+            } else {
+                librocksdb_sys::rocksdb_iter_value(iter, &mut len)
+            }
+        };
+        if ptr.is_null() && len > 0 {
+            return Err(PyException::new_err("RocksDB iterator returned null buffer"));
+        }
+        let copied = if len == 0 {
+            Vec::new()
+        } else {
+            unsafe { slice::from_raw_parts(ptr as *const u8, len).to_vec() }
+        };
+        Ok(Some(copied))
+    }
+
+    /// Return the key at the current iterator position.
+    pub fn key<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match self.copy_buffer(true)? {
+            Some(bytes) => decode_value(py, &bytes, &self.loads, self.raw_mode),
+            None => Ok(py.None().bind(py).to_owned()),
+        }
+    }
+
+    /// Return the value at the current iterator position.
+    pub fn value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match self.copy_buffer(false)? {
+            Some(bytes) => decode_value(py, &bytes, &self.loads, self.raw_mode),
+            None => Ok(py.None().bind(py).to_owned()),
+        }
+    }
+
+    /// Return the current column names and values.
+    pub fn columns<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let columns = {
+            let guard = self.inner.lock().unwrap();
+            if unsafe { librocksdb_sys::rocksdb_iter_valid(*guard) } == 0 {
+                return Ok(py.None().bind(py).to_owned());
+            }
+            crate::wide_columns::iterator_columns(*guard)?
+        };
         let result = PyList::empty(py);
         for (name, value) in columns {
             let name = decode_value(py, &name, &self.loads, self.raw_mode)?;
@@ -351,7 +354,6 @@ impl RdictIter {
         }
         Ok(result.into_any())
     }
-
 }
 
 impl Drop for RdictIter {

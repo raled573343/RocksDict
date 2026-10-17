@@ -20,6 +20,27 @@ class RocksDB11Integration(unittest.TestCase):
         self.assertEqual(sysconfig.get_config_var("Py_GIL_DISABLED"), 1)
         self.assertFalse(sys._is_gil_enabled())
 
+    def test_empty_raw_key_and_invalid_iterator_position(self):
+        with tempfile.TemporaryDirectory(prefix="rd11-emptykey-") as folder:
+            db_path = str(Path(folder) / "db")
+            db = Rdict(db_path, Options(raw_mode=True))
+            try:
+                db[b""] = b""
+                db[b"nonempty"] = b"ok"
+                it = db.iter()
+                self.assertFalse(it.valid())
+                self.assertIsNone(it.key())
+                self.assertIsNone(it.value())
+                it.seek_to_first()
+                self.assertEqual(it.key(), b"")
+                self.assertEqual(it.value(), b"")
+                it.next()
+                self.assertEqual(it.key(), b"nonempty")
+                self.assertEqual(it.value(), b"ok")
+            finally:
+                db.close()
+            Rdict.destroy(db_path)
+
     def test_native_11_options(self):
         opts = Options(raw_mode=True)
         opts.set_read_io_executor_threads(2)
