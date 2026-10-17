@@ -47,3 +47,34 @@ iterators, SST writers, checkpoints, and configuration objects across threads
 without application-level synchronization; review additional `unsafe impl
 Send/Sync` declarations and native API thread-safety before treating the
 entire extension as universally safe under unconstrained concurrent use.
+
+## CI build cache
+
+The two build jobs maintain **independent** caches for Windows x64 and Linux
+manylinux x64. All Rust objects are keyed by OS, target ABI, pinned Rust version
+and Cargo manifests. The cache restores and saves:
+
+- `.ci-cargo/registry` and `.ci-cargo/git`: downloaded crates and Git dependencies.
+- `target`: compiled `.rlib` crates (including `once_cell`) **and** RocksDB
+  native C/C++ objects. A compile failure or downstream test failure does not
+  prevent saving successfully created intermediate outputs.
+- Windows additionally caches the LLVM/Clang 21.1.3 installation and skips
+  downloading/installing it after an exact cache hit.
+
+On Linux, `CARGO_HOME` and `CARGO_TARGET_DIR` explicitly point inside the
+host-mounted workspace **in the manylinux Docker container**, so Actions sees
+and caches the files produced during the container build. The cache is restored
+before Maturin starts; it is saved at the end even on failed test runs.
+
+The **first run fills the cache** and still compiles `once_cell` and RocksDB.
+A warm cache saves the work on subsequent compatible runs, provided the
+dependency/compiler profile and native toolchain have not changed. Compiler
+versions, build flags, Cargo lockfile updates, or cache eviction may trigger
+recompilation. Do not share compiled objects across operating systems.
+
+External checkout/submodule downloads, the manylinux Docker image pull, and
+container-installed system RPM packages are not in this Cargo cache. Caching
+these multi-gigabyte images via GitHub's artifact cache would be expensive and
+fragile; a separately maintained prebuilt image is the appropriate solution
+if they become the dominant cost. The Python installer itself is managed by
+`actions/setup-python` using the hosted tool cache.

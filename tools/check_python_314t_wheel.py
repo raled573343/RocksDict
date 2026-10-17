@@ -70,18 +70,24 @@ def smoke_test() -> None:
                 db[key] = value
                 assert db[key] == value, (worker, j)
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(thread_job, range(workers)))
-        assert len(db) == workers * count
-        db.close()
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(thread_job, range(workers)))
+            # Rdict does not define __len__; count through its public key iterator.
+            assert sum(1 for _ in db.keys()) == workers * count
+        finally:
+            # Always release RocksDB LOCK, including on Windows when assertions fail.
+            db.close()
 
         # Check that database data survives close/open.
         db = Rdict(path, options=Options(raw_mode=True))
-        for worker in range(workers):
-            for j in range(count):
-                key = f"worker-{worker}-key-{j}".encode()
-                assert db[key] == f"value-{worker}-{j}".encode()
-        db.close()
+        try:
+            for worker in range(workers):
+                for j in range(count):
+                    key = f"worker-{worker}-key-{j}".encode()
+                    assert db[key] == f"value-{worker}-{j}".encode()
+        finally:
+            db.close()
         Rdict.destroy(path)
 
     require_no_gil("after concurrent read/write smoke test")
