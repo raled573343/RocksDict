@@ -2,7 +2,8 @@ from .rocksdict import *
 
 __doc__ = rocksdict.__doc__
 
-__all__ = ["Rdict",
+__all__ = ["native_rocksdb_version",
+           "Rdict",
            "WriteBatch",
            "SstFileWriter",
            "AccessType",

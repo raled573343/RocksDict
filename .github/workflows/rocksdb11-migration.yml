@@ -74,7 +74,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev zlib1g-dev libbz2-dev
-          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> "$GITHUB_ENV"
+          libclang="$(find -L /usr/lib/llvm-* /usr/lib/x86_64-linux-gnu -name 'libclang.so*' -type f 2>/dev/null | head -n 1 || true)"
+          if [[ -z "$libclang" ]]; then
+            echo "::error::Cannot locate libclang.so after installing libclang-dev"
+            exit 1
+          fi
+          echo "LIBCLANG_PATH=$(dirname "$libclang")" >> "$GITHUB_ENV"
       - name: Restore Rust/C++ compiler artifacts
         id: build-cache
         uses: actions/cache/restore@v4

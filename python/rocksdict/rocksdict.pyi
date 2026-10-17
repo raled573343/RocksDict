@@ -1,11 +1,10 @@
-def native_rocksdb_version() -> Tuple[int, int, int]:
-    """Native RocksDB version linked into the extension; (11, 8, 1) for this port."""
-    ...
-
 from __future__ import annotations
 
 from types import TracebackType
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union
+
+# Compiled native RocksDB version; validated at runtime by integration tests.
+def native_rocksdb_version() -> Tuple[int, int, int]: ...
 
 __all__ = [
     "Rdict",
