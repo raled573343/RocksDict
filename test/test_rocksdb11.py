@@ -24,6 +24,7 @@ class RocksDB11Integration(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rd11-emptykey-") as folder:
             db_path = str(Path(folder) / "db")
             db = Rdict(db_path, Options(raw_mode=True))
+            it = None
             try:
                 db[b""] = b""
                 db[b"nonempty"] = b"ok"
@@ -38,6 +39,9 @@ class RocksDB11Integration(unittest.TestCase):
                 self.assertEqual(it.key(), b"nonempty")
                 self.assertEqual(it.value(), b"ok")
             finally:
+                # A live iterator deliberately keeps the native DB lock held.
+                # Release it before destroying the temporary database.
+                it = None
                 db.close()
             Rdict.destroy(db_path)
 
@@ -157,7 +161,9 @@ class RocksDB11Integration(unittest.TestCase):
     def test_verify_native_file_checksums(self):
         with tempfile.TemporaryDirectory(prefix="rd11-checksums-") as folder:
             path = str(Path(folder) / "db")
-            db = Rdict(path, Options(raw_mode=True))
+            opts = Options(raw_mode=True)
+            opts.set_file_checksum_gen_factory_crc32c()
+            db = Rdict(path, opts)
             try:
                 db[b"key"] = b"value"
                 db.flush()

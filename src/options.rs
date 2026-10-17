@@ -621,6 +621,16 @@ impl OptionsPy {
 
 #[pymethods]
 impl OptionsPy {
+    /// Enable RocksDB 11 CRC32C file-level SST checksums on newly written
+    /// files. This must be set on Options BEFORE opening a database; it does
+    /// not backfill checksum metadata for existing SST files.
+    ///
+    /// Unlike per-block checksums, full-file verification requires a factory.
+    pub fn set_file_checksum_gen_factory_crc32c(&mut self) {
+        self.inner_opt
+            .set_file_checksum_gen_factory(&FileChecksumGenFactory::crc32c());
+    }
+
     /// RocksDB 11.8: minimum size of the shared async-read executor.
     ///
     /// Opening a DB may increase the shared executor thread count, but will
