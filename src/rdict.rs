@@ -276,6 +276,13 @@ impl Rdict {
                 cfs
             }
         };
+        // RocksDB 11.8 requires Duration instead of the legacy i32 TTL.
+        // Negative values must not wrap to a huge unsigned duration.
+        if let AccessTypeInner::WithTTL { ttl } = &access_type.0 {
+            if *ttl < 0 {
+                return Err(PyException::new_err("RocksDB TTL cannot be negative"));
+            }
+        }
         // open db
         let db = match &access_type.0 {
             AccessTypeInner::ReadWrite => DB::open_cf_descriptors(opt_inner, path, cfs),
@@ -286,7 +293,7 @@ impl Rdict {
                 DB::open_cf_descriptors_as_secondary(opt_inner, path, secondary_path, cfs)
             }
             AccessTypeInner::WithTTL { ttl } => {
-                DB::open_cf_descriptors_with_ttl(opt_inner, path, cfs, *ttl)
+                DB::open_cf_descriptors_with_ttl(opt_inner, path, cfs, Duration::from_secs(*ttl as u64))
             }
         }
         .map_err(|e| PyException::new_err(e.to_string()))?;

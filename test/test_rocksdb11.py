@@ -41,6 +41,12 @@ class RocksDB11Integration(unittest.TestCase):
                 db.close()
             Rdict.destroy(db_path)
 
+    def test_invalid_legacy_ttl_rejected(self):
+        from rocksdict import AccessType
+        with tempfile.TemporaryDirectory(prefix="rd11-ttl-") as folder:
+            with self.assertRaisesRegex(Exception, "TTL cannot be negative"):
+                Rdict(str(Path(folder) / "db"), access_type=AccessType.with_ttl(-1))
+
     def test_native_11_options(self):
         opts = Options(raw_mode=True)
         opts.set_read_io_executor_threads(2)
