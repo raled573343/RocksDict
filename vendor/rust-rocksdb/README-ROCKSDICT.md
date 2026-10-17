@@ -10,7 +10,8 @@ Minimal intentional deviations from upstream:
 
 1. Remove the upstream Cargo workspace member/path dependency on
    `librocksdb-sys`. Use one exact published native dependency.
-2. Add `ColumnFamilyDescriptor::into_name_and_options` so RocksDict can
+2. Exclude the upstream `[[bench]] hot_paths` target (bench files are not vendored).
+3. Add `ColumnFamilyDescriptor::into_name_and_options` so RocksDict can
    preserve the real native per-column-family Options loaded from disk,
    rather than using defaults or accessing private layout through unsafe.
 

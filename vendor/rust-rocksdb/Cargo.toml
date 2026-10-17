@@ -84,6 +84,4 @@ criterion = "0.8.2"
 tempfile = "3"
 pretty_assertions = "1"
 
-[[bench]]
-name = "hot_paths"
-harness = false
+# Standalone vendoring omits upstream benchmarks; application code builds only.
