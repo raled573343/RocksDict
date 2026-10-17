@@ -17,6 +17,12 @@ on:
         options:
           - check-linux
           - wheels-both
+          - test-wheels
+      source_run_id:
+        description: "Existing run ID holding candidate wheels (test-wheels only; no compilation)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -319,8 +325,23 @@ jobs:
           python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
       - name: Check no-GIL import, multithreaded access and persistence
         run: python tools/check_python_314t_wheel.py --platform ${{ matrix.platform }}
-      - name: Run existing Python unit tests
-        run: python -X gil=0 -m unittest discover -v -s test
+
+      # This deliberately precedes ALL regression tests: a crash must not
+      # discard the already compiled binary, nor force a native recompilation
+      # just to reproduce it. Candidate artifacts are NEVER published.
+      - name: Preserve unverified wheel for no-build diagnostic reruns
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-rocksdict11-${{ matrix.platform }}-${{ github.run_id }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Focused RocksDB11 regression tests with crash traceback
+        run: python -X gil=0 -X faulthandler -m unittest -v test.test_rocksdb11
+
+      - name: Existing Python unit tests with crash traceback
+        run: python -X gil=0 -X faulthandler -m unittest discover -v -s test
       - name: Upload passing candidate wheels
         uses: actions/upload-artifact@v4
         with:
@@ -364,6 +385,71 @@ jobs:
             ~/.rustup/toolchains/1.91.1-*
             ~/.rustup/update-hashes/1.91.1-*
           key: host-rustup-1.91.1-${{ runner.os }}-${{ runner.arch }}-v1
+
+  test-wheels:
+    name: Re-test existing binary, NO native compile - ${{ matrix.platform }}
+    # Explicit manual stage; downloaded wheels MUST match a verified source run.
+    if: github.event_name == 'workflow_dispatch' && inputs.stage == 'test-wheels'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: manylinux_2_28_x86_64
+          - runner: windows-2022
+            platform: win_amd64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14t'
+          architecture: x64
+      - name: Verify source run id for artifact download
+        shell: python
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          import os
+          run_id = os.environ.get("SOURCE_RUN_ID", "")
+          if not run_id.isascii() or not run_id.isdecimal() or int(run_id) <= 0:
+              raise SystemExit("An existing numeric source_run_id is required")
+
+      # No Rust/Clang/Docker/dependency downloads: these are already built.
+      # setup-python uses its hosted tool cache, pip installs without an index.
+      - name: Download prior run's unverified candidate wheel
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.source_run_id }}
+          name: candidate-rocksdict11-${{ matrix.platform }}-${{ inputs.source_run_id }}
+          path: dist
+      - name: Install candidate wheel offline
+        run: python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
+      - name: Check GIL stays disabled and RocksDB 11 ABI
+        shell: python
+        run: |
+          import rocksdict
+          import sys
+          import sysconfig
+          assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+          assert not sys._is_gil_enabled()
+          assert rocksdict.native_rocksdb_version() == (11, 8, 1)
+      - name: Focused CF regression with native crash traceback
+        run: >-
+          python -X gil=0 -X faulthandler -m unittest discover
+          -v -s test -p test_rdict.py -k test_column_families_custom_options_auto_reopen
+      - name: Run RocksDB11 regression tests
+        run: python -X gil=0 -X faulthandler -m unittest -v test.test_rocksdb11
+      - name: Run full regression suite
+        run: python -X gil=0 -X faulthandler -m unittest discover -v -s test
 
   publish:
     name: Publish tested RocksDB 11.8.1 GitHub Release
