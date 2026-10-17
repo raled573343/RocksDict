@@ -149,7 +149,7 @@ jobs:
             local exit_code="$?"
             trap - ERR INT TERM
             echo "::error::Publish failed (status $exit_code); attempting restoration of BOTH original releases."
-            for tag in "\${tags[@]}"; do
+            for tag in "${tags[@]}"; do
               gh release upload "$tag" "release-backup/$tag/"*.whl "release-backup/$tag/SHA256SUMS" --clobber ||
                 echo "::error::Automatic restore failed for $tag: backups are preserved as Actions artifact."
               gh release edit "$tag" --notes-file "release-backup/$tag/ORIGINAL_RELEASE_NOTES.md" ||
@@ -158,7 +158,7 @@ jobs:
             exit "$exit_code"
           }
           trap rollback ERR INT TERM
-          for tag in "\${tags[@]}"; do
+          for tag in "${tags[@]}"; do
             gh release upload "$tag" "legal-preview/$tag/"*.whl "legal-preview/$tag/SHA256SUMS" --clobber
             python - "$tag" <<'PY'
           import hashlib
