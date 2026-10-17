@@ -52,7 +52,7 @@ impl CheckpointPy {
 
     /// Creates new physical DB checkpoint in directory specified by `path`.
     #[pyo3(signature = (path))]
-    pub fn create_checkpoint(&self, path: &str) -> PyResult<()> {
+    pub fn create_checkpoint(&mut self, path: &str) -> PyResult<()> {
         let cpath = to_cpath(path)?;
 
         /// Undocumented parameter for `ffi::rocksdb_checkpoint_create` function. Zero by default.

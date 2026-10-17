@@ -107,7 +107,8 @@ use pyo3::prelude::*;
 /// - value: `int, float, bool, str, bytes` and anything that
 ///     supports `pickle`.
 ///
-#[pymodule]
+// PyO3 0.27 defaults to gil_used=true: explicitly opt in for CPython 3.14t.
+#[pymodule(gil_used = false)]
 fn rocksdict(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<Rdict>()?;
     m.add_class::<OptionsPy>()?;

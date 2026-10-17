@@ -1,0 +1,174 @@
+name: CPython 3.14t wheels (Windows and Linux x64)
+
+on:
+  push:
+    branches: [main, ci/python-314t-x64-wheels]
+    paths:
+      - .github/workflows/python-314t-wheels.yml
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - src/**
+      - python/**
+      - rust-rocksdb
+      - test/**
+      - tools/check_python_314t_wheel.py
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/python-314t-wheels.yml
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - src/**
+      - python/**
+      - rust-rocksdb
+      - test/**
+      - tools/check_python_314t_wheel.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-314t-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wheels:
+    name: Build and test ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: manylinux_2_28_x86_64
+            artifact: rocksdict-314t-linux-x64
+          - runner: windows-2022
+            platform: win_amd64
+            artifact: rocksdict-314t-windows-x64
+    steps:
+      - name: Checkout including native RocksDB submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install CPython 3.14 free-threaded
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14t'
+          architecture: x64
+
+      - name: Verify build interpreter
+        shell: python
+        run: |
+          import platform
+          import sys
+          import sysconfig
+          assert sys.version_info[:2] == (3, 14), sys.version
+          assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+          assert sys.maxsize > 2**32 and platform.machine().lower() in ("x86_64", "amd64")
+          assert not sys._is_gil_enabled(), "CPython must start with GIL disabled"
+          print(sys.version)
+          print("Free-threaded build:", sysconfig.get_config_var("Py_GIL_DISABLED"))
+
+      - name: Install LLVM/Clang on Windows
+        if: runner.os == 'Windows'
+        uses: KyleMayes/install-llvm-action@v2.0.8
+        with:
+          version: 21.1.3
+          directory: ${{ runner.temp }}/llvm-21.1.3
+
+      - name: Build Linux manylinux_2_28 cp314t wheel
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          rust-toolchain: '1.91.1'
+          target: x86_64
+          manylinux: '2_28'
+          before-script-linux: |
+            dnf install -y clang clang-devel llvm-devel cmake make perl
+          args: >-
+            --release --locked --out dist --no-default-features
+            --features bindgen-runtime --interpreter python3.14t
+
+      - name: Build Windows x64 cp314t wheel
+        if: runner.os == 'Windows'
+        uses: PyO3/maturin-action@v1
+        with:
+          rust-toolchain: '1.91.1'
+          target: x64
+          args: >-
+            --release --locked --out dist --no-default-features
+            --features bindgen-runtime --interpreter python3.14t
+        env:
+          LIBCLANG_PATH: ${{ runner.temp }}/llvm-21.1.3/lib
+          CC: ${{ runner.temp }}/llvm-21.1.3/bin/clang-cl
+          CXX: ${{ runner.temp }}/llvm-21.1.3/bin/clang-cl
+          AR: ${{ runner.temp }}/llvm-21.1.3/bin/llvm-lib
+
+      - name: Validate wheel metadata and CPython ABI
+        run: python tools/check_python_314t_wheel.py --wheel-only --platform ${{ matrix.platform }}
+
+      - name: Install only locally built wheel (no PyPI / no sdist)
+        run: python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
+
+      - name: Verify no-GIL import, persistence, and threaded operations
+        run: python tools/check_python_314t_wheel.py --platform ${{ matrix.platform }}
+
+      - name: Run existing project unit tests with GIL disabled
+        run: python -X gil=0 -m unittest discover -v -s test
+
+      - name: Upload tested platform wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+  bundle:
+    name: Collect verified x64 wheels
+    needs: wheels
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Download Windows and Linux wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rocksdict-314t-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify both ABI-specific wheels are present
+        shell: python
+        run: |
+          from pathlib import Path
+          names = [p.name for p in Path("dist").glob("*.whl")]
+          assert len(names) == 2, f"Expected exactly two wheels: {names}"
+          assert all("-cp314-cp314t-" in n for n in names), names
+          assert any("manylinux_2_28_x86_64.whl" in n for n in names), names
+          assert any("win_amd64.whl" in n for n in names), names
+          print("\n".join(names))
+
+      - name: Produce SHA256 manifest
+        shell: python
+        run: |
+          import hashlib
+          from pathlib import Path
+          wheels = sorted(Path("dist").glob("*.whl"))
+          manifest = "".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in wheels)
+          (Path("dist") / "SHA256SUMS").write_text(manifest, encoding="utf-8")
+          print(manifest)
+
+      - name: Upload combined distribution with hashes
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocksdict-python-314t-x64-complete
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30

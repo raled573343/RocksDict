@@ -74,7 +74,7 @@ impl SstFileWriterPy {
     }
 
     /// Prepare SstFileWriter to write into file located at "file_path".
-    fn open(&self, path: &str) -> PyResult<()> {
+    fn open(&mut self, path: &str) -> PyResult<()> {
         let cpath = to_cpath(path)?;
         self.open_raw(&cpath)
     }
@@ -85,7 +85,7 @@ impl SstFileWriterPy {
     }
 
     /// returns the current file size
-    fn file_size(&self) -> u64 {
+    fn file_size(&mut self) -> u64 {
         self.file_size_raw()
     }
 
