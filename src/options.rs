@@ -569,15 +569,15 @@ impl OptionsPy {
         let column_families: PyResult<HashMap<_, _>> = column_families
             .into_iter()
             .map(|c| {
+                // The pinned wrapper exposes this narrow consuming accessor
+                // so options are restored exactly, not reconstructed from defaults.
+                let (name, native_options) = c.into_name_and_options();
                 let opt = OptionsPy::compose_options_py(
-                    c.options,
+                    native_options,
                     raw_mode,
-                    slice_transforms.get(&c.name).cloned(),
-                );
-                match opt {
-                    Ok(opt) => Ok((c.name, opt)),
-                    Err(e) => Err(e),
-                }
+                    slice_transforms.get(&name).cloned(),
+                )?;
+                Ok((name, opt))
             })
             .collect();
         Ok((options, column_families?))

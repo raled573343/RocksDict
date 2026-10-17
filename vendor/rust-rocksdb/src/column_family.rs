@@ -68,6 +68,14 @@ impl ColumnFamilyDescriptor {
         self.ttl = ttl;
     }
 
+    /// RocksDict compatibility: extract the exact parsed native CF options.
+    ///
+    /// This ownership-taking method avoids private-layout casts and retains
+    /// all persisted RocksDB configuration during Python options reload.
+    pub fn into_name_and_options(self) -> (String, Options) {
+        (self.name, self.options)
+    }
+
     /// Get the name of the ColumnFamilyDescriptor.
     pub fn name(&self) -> &str {
         &self.name

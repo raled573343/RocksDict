@@ -20,7 +20,7 @@ test = false
 # The 0.53.0 wrapper and 0.48.1+11.8.1 native crate are one compatible pair.
 # Pin exact releases to avoid silently updating the native engine.
 # A change to this Cargo manifest initiates only a single-platform type check.
-rocksdb = { package = "rust-rocksdb", version = "=0.53.0", default-features = false, features = [
+rocksdb = { package = "rust-rocksdb", path = "vendor/rust-rocksdb", version = "=0.53.0", default-features = false, features = [
     "snappy",
     "lz4",
     "zstd",
