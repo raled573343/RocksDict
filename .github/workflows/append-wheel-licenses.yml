@@ -135,7 +135,7 @@ jobs:
       - name: Persist backups BEFORE any release asset is changed
         uses: actions/upload-artifact@v4
         with:
-          name: ORIGINAL-cp314t-releases-backup-\${{ github.run_id }}
+          name: ORIGINAL-cp314t-releases-backup-${{ github.run_id }}
           path: release-backup/
           retention-days: 90
           if-no-files-found: error
