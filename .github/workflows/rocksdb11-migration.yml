@@ -54,6 +54,8 @@ jobs:
     if: (github.event_name == 'push' && !contains(github.event.head_commit.message, '[build-wheels]')) || (github.event_name == 'workflow_dispatch' && inputs.stage == 'check-linux')
     needs: verify-source
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # Commit the exact resolver-generated lockfile to this branch.
     timeout-minutes: 90
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -93,14 +95,35 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rocksdb11-check-linux-rust1911-${{ hashFiles('Cargo.toml') }}
+          key: rocksdb11-check-linux-rust1911-${{ hashFiles('Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
+            rocksdb11-check-linux-rust1911-${{ hashFiles('Cargo.toml') }}-
             rocksdb11-check-linux-rust1911-
       - name: Resolve dependencies and update candidate lockfile
         shell: bash
         run: |
           cargo generate-lockfile
           cargo tree -i rust-librocksdb-sys
+      - name: Commit resolved RocksDB 11 Cargo.lock without another compiler job
+        if: github.ref == 'refs/heads/feat/rocksdb-11-8-1-cp314t'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock unchanged"
+          else
+            sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/Cargo.lock?ref=$GITHUB_REF_NAME" --jq '.sha')"
+            content="$(base64 -w0 Cargo.lock)"
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/Cargo.lock" \
+              -f message='build: pin RocksDB 11 Rust dependency resolution' \
+              -f content="$content" \
+              -f sha="$sha" \
+              -f branch="$GITHUB_REF_NAME" --jq '.commit.sha'
+            echo "Committed lockfile without triggering a new Actions run"
+          fi
+
       - name: Verify source Python interpreter is no-GIL
         shell: python
         run: |
@@ -162,8 +185,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.91.1'
-      - name: Refresh lockfile for the pinned 11.8.1 pair
-        run: cargo generate-lockfile
+      - name: Require committed Cargo.lock (no dependency drift)
+        run: cargo metadata --locked --no-deps --format-version 1
       - name: Restore native Cargo cache
         id: cargo-cache
         uses: actions/cache/restore@v4
