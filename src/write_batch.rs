@@ -184,14 +184,18 @@ impl WriteBatchPy {
         let mut names_vec = Vec::with_capacity(names.len());
         let mut values_vec = Vec::with_capacity(values.len());
         for name in names.iter() {
-            names_vec.push(encode_value(name, &self.dumps, self.raw_mode)?);
+            names_vec.push(encode_value(name, &self.dumps, self.raw_mode)?.into_owned());
         }
         for value in values.iter() {
-            values_vec.push(encode_value(value, &self.dumps, self.raw_mode)?);
+            values_vec.push(encode_value(value, &self.dumps, self.raw_mode)?.into_owned());
         }
-        inner
-            .put_entity_cf_opt(&cf.cf, key, &names_vec, &values_vec)
-            .map_err(|e| PyException::new_err(e.to_string()))
+        crate::wide_columns::batch_put_entity(
+            inner,
+            &cf.cf,
+            key.as_ref(),
+            &names_vec,
+            &values_vec,
+        )
     }
 
     /// Removes the database entry for key. Does nothing if the key was not found.

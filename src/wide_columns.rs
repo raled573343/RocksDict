@@ -47,6 +47,18 @@ unsafe extern "C" {
         flags: c_uint,
         err: *mut *mut c_char,
     ) -> c_int;
+    fn rocksdict11_writebatch_put_entity(
+        batch: *mut librocksdb_sys::rocksdb_writebatch_t,
+        cf: *mut librocksdb_sys::rocksdb_column_family_handle_t,
+        key: *const c_char,
+        key_len: size_t,
+        names: *const *const c_char,
+        name_lens: *const size_t,
+        values: *const *const c_char,
+        value_lens: *const size_t,
+        count: size_t,
+        err: *mut *mut c_char,
+    ) -> c_int;
     fn rocksdict11_iter_columns(
         iterator: *mut librocksdb_sys::rocksdb_iterator_t,
         out: *mut *mut NativeColumns,
@@ -181,6 +193,50 @@ pub(crate) fn put_entity(
         Ok(())
     } else {
         Err(native_error(err, "RocksDB native PutEntity failed"))
+    }
+}
+
+/// Preserve wide-column batch operations while using rust-rocksdb 0.53,
+/// which intentionally does not expose WriteBatch::PutEntity in its Rust API.
+pub(crate) fn batch_put_entity(
+    batch: &mut rocksdb::WriteBatch,
+    cf: &ColumnFamilyHandle,
+    key: &[u8],
+    names: &[Vec<u8>],
+    values: &[Vec<u8>],
+) -> PyResult<()> {
+    if names.len() != values.len() {
+        return Err(PyException::new_err("column names and values must have equal lengths"));
+    }
+    if names.is_empty() || names.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(PyException::new_err(
+            "wide-column names must be nonempty, strictly sorted and unique",
+        ));
+    }
+
+    let names_ptr: Vec<*const c_char> = names.iter().map(|b| b.as_ptr() as *const c_char).collect();
+    let values_ptr: Vec<*const c_char> = values.iter().map(|b| b.as_ptr() as *const c_char).collect();
+    let names_len: Vec<size_t> = names.iter().map(Vec::len).collect();
+    let values_len: Vec<size_t> = values.iter().map(Vec::len).collect();
+    let mut error = null_mut();
+    let status = unsafe {
+        rocksdict11_writebatch_put_entity(
+            batch.as_raw_writebatch_mut(),
+            cf.inner(),
+            key.as_ptr() as *const c_char,
+            key.len(),
+            names_ptr.as_ptr(),
+            names_len.as_ptr(),
+            values_ptr.as_ptr(),
+            values_len.as_ptr(),
+            names.len(),
+            &mut error,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(native_error(error, "RocksDB 11 WriteBatch::PutEntity failed"))
     }
 }
 

@@ -637,11 +637,6 @@ impl OptionsPy {
         self.inner_opt.get_read_io_executor_threads()
     }
 
-    /// RocksDB 11: avoid blocking DB::Open on obsolete OPTIONS-file cleanup.
-    pub fn set_avoid_unnecessary_blocking_io(&mut self, enabled: bool) {
-        self.inner_opt.set_avoid_unnecessary_blocking_io(enabled);
-    }
-
     #[new]
     #[pyo3(signature = (raw_mode = false))]
     pub fn new(raw_mode: bool) -> Self {

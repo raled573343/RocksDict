@@ -14,6 +14,7 @@
 #include "rocksdb/options.h"
 #include "rocksdb/version.h"
 #include "rocksdb/wide_columns.h"
+#include "rocksdb/write_batch.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +33,9 @@ struct rocksdb_t {
 };
 struct rocksdb_iterator_t {
   rocksdb::Iterator* rep;
+};
+struct rocksdb_writebatch_t {
+  rocksdb::WriteBatch rep;
 };
 struct rocksdb_column_family_handle_t {
   rocksdb::ColumnFamilyHandle* rep;
@@ -151,6 +155,43 @@ int rocksdict11_put_entity(
     return -1;
   } catch (...) {
     set_error(error, "unknown exception in PutEntity");
+    return -1;
+  }
+}
+
+// Append a wide-column PutEntity operation to an existing RocksDB write batch.
+// The returned status is validated by Rust before the batch is written to DB.
+int rocksdict11_writebatch_put_entity(
+    rocksdb_writebatch_t* batch, rocksdb_column_family_handle_t* cf,
+    const char* key, size_t key_len, const char* const* names,
+    const size_t* name_lens, const char* const* values,
+    const size_t* value_lens, size_t count, char** error) {
+  if (error) *error = nullptr;
+  if (!batch || !cf || !cf->rep ||
+      (count && (!names || !name_lens || !values || !value_lens))) {
+    set_error(error, "invalid RocksDB WriteBatch PutEntity arguments");
+    return -1;
+  }
+  try {
+    rocksdb::WideColumns columns;
+    columns.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      columns.emplace_back(
+          rocksdb::Slice(names[i], name_lens[i]),
+          rocksdb::Slice(values[i], value_lens[i]));
+    }
+    auto status = batch->rep.PutEntity(
+        cf->rep, rocksdb::Slice(key, key_len), columns);
+    if (!status.ok()) {
+      set_error(error, status.ToString());
+      return -1;
+    }
+    return 0;
+  } catch (const std::exception& exc) {
+    set_error(error, exc.what());
+    return -1;
+  } catch (...) {
+    set_error(error, "unknown exception in WriteBatch PutEntity");
     return -1;
   }
 }

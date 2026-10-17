@@ -43,9 +43,9 @@ class RocksDB11Integration(unittest.TestCase):
 
     def test_invalid_legacy_ttl_rejected(self):
         from rocksdict import AccessType
-        with tempfile.TemporaryDirectory(prefix="rd11-ttl-") as folder:
-            with self.assertRaisesRegex(Exception, "TTL cannot be negative"):
-                Rdict(str(Path(folder) / "db"), access_type=AccessType.with_ttl(-1))
+        # Python -> u64 validation occurs before Duration construction.
+        with self.assertRaises((OverflowError, ValueError)):
+            AccessType.with_ttl(-1)
 
     def test_native_11_ingest_option_controls(self):
         from rocksdict import IngestExternalFileOptions
@@ -187,6 +187,25 @@ class RocksDB11Integration(unittest.TestCase):
                 self.assertEqual(reopened.get_column_family("data")[b"hello"], b"world")
             finally:
                 reopened.close()
+            Rdict.destroy(path)
+
+    def test_wide_column_write_batch_is_atomic(self):
+        from rocksdict import WriteBatch
+        with tempfile.TemporaryDirectory(prefix="rd11-wb-entity-") as folder:
+            path = str(Path(folder) / "db")
+            db = Rdict(path, Options(raw_mode=True))
+            try:
+                wb = WriteBatch(raw_mode=True)
+                wb.set_default_column_family(db.get_column_family_handle("default"))
+                wb.put_entity(b"entity", [b"", b"color"], [b"one", b"green"])
+                wb.put(b"plain", b"two")
+                db.write(wb)
+                self.assertEqual(db.get_entity(b"entity"), [(b"", b"one"), (b"color", b"green")])
+                self.assertEqual(db[b"plain"], b"two")
+                with self.assertRaises(Exception):
+                    wb.put(b"after", b"consumed")
+            finally:
+                db.close()
             Rdict.destroy(path)
 
     def test_read_snapshot_is_stable(self):

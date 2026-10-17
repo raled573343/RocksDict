@@ -265,6 +265,18 @@ unsafe extern "C" fn writebatch_merge_cf_callback<T: WriteBatchIteratorCf>(
     }
 }
 
+/// Narrow escape hatch for the RocksDict 11 wide-column C++ compatibility
+/// bridge. This is restricted to non-transactional write batches.
+#[cfg(feature = "raw-ptr")]
+impl WriteBatchWithTransaction<false> {
+    /// # Safety
+    /// The returned C pointer is valid only while this batch is alive.
+    /// Callers must not free it or use it after the mutable borrow ends.
+    pub unsafe fn as_raw_writebatch_mut(&mut self) -> *mut ffi::rocksdb_writebatch_t {
+        self.inner
+    }
+}
+
 impl<const TRANSACTION: bool> WriteBatchWithTransaction<TRANSACTION> {
     /// Create a new `WriteBatch` without allocating memory.
     pub fn new() -> Self {
