@@ -24,8 +24,10 @@ pub(crate) struct ColumnFamilyHandle {
 
 impl ColumnFamilyHandle {
     pub(crate) fn new(db: Arc<DB>, name: &str) -> Option<Self> {
+        // Keep the source Arc borrowed by the temporary BoundColumnFamily.
+        // Clone the strong reference rather than moving a still-borrowed DB.
         db.cf_handle(name).map(|_| Self {
-            db,
+            db: db.clone(),
             name: Arc::from(name),
         })
     }
