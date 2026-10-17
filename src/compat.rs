@@ -11,38 +11,29 @@ use std::sync::Arc;
 
 type DB = DBWithThreadMode<MultiThreaded>;
 
-/// Strong DB reference + name: owns the database until the CF proxy is dropped.
+/// An owned native CF handle plus its owning database.
 ///
-/// An underlying CF must not be dropped while a proxy for it is being used.
-/// The outer Python API enforces CF lifetime rules; the lookup below performs
-/// a fail-fast sanity check instead of dereferencing a stale C pointer.
+/// The CF Arc is dropped before the DB Arc. Both are required: the Rust
+/// wrapper may remove a dropped CF from its map while other Python objects
+/// still reference its C handle.
 #[derive(Clone)]
 pub(crate) struct ColumnFamilyHandle {
-    db: Arc<DB>,
-    name: Arc<str>,
+    cf: rocksdb::OwnedColumnFamily,
+    _db: Arc<DB>,
 }
 
 impl ColumnFamilyHandle {
     pub(crate) fn new(db: Arc<DB>, name: &str) -> Option<Self> {
-        // Keep the source Arc borrowed by the temporary BoundColumnFamily.
-        // Clone the strong reference rather than moving a still-borrowed DB.
-        db.cf_handle(name).map(|_| Self {
-            db: db.clone(),
-            name: Arc::from(name),
+        db.cf_handle_owned(name).map(|cf| Self {
+            cf,
+            _db: db.clone(),
         })
-    }
-
-    pub(crate) fn name_str(&self) -> &str {
-        &self.name
     }
 }
 
 impl AsColumnFamilyRef for ColumnFamilyHandle {
     fn inner(&self) -> *mut ffi::rocksdb_column_family_handle_t {
-        self.db
-            .cf_handle(&self.name)
-            .expect("column family handle invalidated during native API use")
-            .inner()
+        self.cf.inner()
     }
 }
 

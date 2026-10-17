@@ -202,6 +202,9 @@ pub use crate::{
     write_buffer_manager::WriteBufferManager,
 };
 
+#[cfg(feature = "multi-threaded-cf")]
+pub use crate::db::OwnedColumnFamily;
+
 use rust_librocksdb_sys as ffi;
 
 /// The raw `librocksdb` bindings this crate is built against.

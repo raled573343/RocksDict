@@ -5493,7 +5493,36 @@ impl<I: DBInner> DBCommon<SingleThreaded, I> {
     }
 }
 
+/// An owned column-family handle without a fabricated lifetime.
+///
+/// Underlying handle destruction is deferred by the existing UnboundColumnFamily
+/// refcount, even when the family has been dropped from the DB's name index.
+/// This type is used by external language bindings that outlive temporary
+/// `BoundColumnFamily<'_>` borrows.
+#[cfg(feature = "multi-threaded-cf")]
+#[derive(Clone)]
+pub struct OwnedColumnFamily(Arc<UnboundColumnFamily>);
+
+#[cfg(feature = "multi-threaded-cf")]
+impl AsColumnFamilyRef for OwnedColumnFamily {
+    fn inner(&self) -> *mut ffi::rocksdb_column_family_handle_t {
+        self.0.inner
+    }
+}
+
 impl<I: DBInner> DBCommon<MultiThreaded, I> {
+    /// Obtain a refcounted column family handle with no borrowed DB lifetime.
+    /// The caller is responsible for also retaining the underlying DB.
+    #[cfg(feature = "multi-threaded-cf")]
+    pub fn cf_handle_owned(&self, name: &str) -> Option<OwnedColumnFamily> {
+        self.cfs
+            .cfs
+            .read()
+            .get(name)
+            .cloned()
+            .map(OwnedColumnFamily)
+    }
+
     /// Creates column family with given name and options
     pub fn create_cf<N: AsRef<str>>(&self, name: N, opts: &Options) -> Result<(), Error> {
         // Note that we acquire the cfs lock before inserting: otherwise we might race

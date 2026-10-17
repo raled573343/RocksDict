@@ -114,6 +114,23 @@ class RocksDB11Integration(unittest.TestCase):
                 db.close()
             Rdict.destroy(path)
 
+    def test_cf_handle_survives_family_drop_without_use_after_free(self):
+        with tempfile.TemporaryDirectory(prefix="rd11-dropped-cf-") as folder:
+            path = str(Path(folder) / "db")
+            opts = Options(raw_mode=True)
+            opts.create_if_missing(True)
+            opts.create_missing_column_families(True)
+            db = Rdict(path, opts)
+            try:
+                db.create_column_family("temporary", Options(raw_mode=True)).close()
+                handle = db.get_column_family_handle("temporary")
+                db.drop_column_family("temporary")
+                # The wrapper must not free C CF handle while Python still owns it.
+                del handle
+            finally:
+                db.close()
+            Rdict.destroy(path)
+
     def test_column_family_options_reload(self):
         with tempfile.TemporaryDirectory(prefix="rd11-cf-") as folder:
             path = str(Path(folder) / "db")

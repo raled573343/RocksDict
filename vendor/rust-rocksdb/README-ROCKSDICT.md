@@ -28,3 +28,9 @@ column names and names not sorted bytewise before forwarding them to the C++
 wide-column ordering. The persisted column-family reload API uses
 `into_name_and_options` to transfer native options without reconstructing
 them from defaults.
+
+4. Add a feature-scoped `OwnedColumnFamily` plus
+   `DBCommon<MultiThreaded>::cf_handle_owned`. This preserves native CF
+   reference counting across dropped Python handles and avoids fabricating
+   `'static` lifetimes or looking up dropped column-family names with
+   `expect()` in FFI operations.
