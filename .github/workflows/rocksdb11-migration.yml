@@ -1,14 +1,7 @@
 name: RocksDB 11 migration - manual candidate build
 
-# Explicitly manual: editing code does not trigger native C++ compilations.
+# Explicitly manual. Never compile from push/PR or schedule.
 on:
-  # Cargo-manifest changes trigger just the Linux type-check, never wheel builds.
-  # Rust source/code edits do not automatically compile.
-  push:
-    branches: [feat/rocksdb-11-8-1-cp314t]
-    paths:
-      - Cargo.toml
-      - .github/workflows/rocksdb11-migration.yml
   workflow_dispatch:
     inputs:
       stage:
@@ -53,7 +46,7 @@ jobs:
 
   check-linux:
     name: First compile pass - Linux Rust/PyO3 only
-    if: github.event_name == 'push' || inputs.stage == 'check-linux'
+    if: inputs.stage == 'check-linux'
     needs: verify-source
     runs-on: ubuntu-24.04
     timeout-minutes: 90
