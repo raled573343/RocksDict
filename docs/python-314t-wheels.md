@@ -80,3 +80,21 @@ these multi-gigabyte images via GitHub's artifact cache would be expensive and
 fragile; a separately maintained prebuilt image is the appropriate solution
 if they become the dominant cost. The Python installer itself is managed by
 `actions/setup-python` using the hosted tool cache.
+
+## Native build source timestamps
+
+Cargo's `rerun-if-changed` detects native source modifications using file
+modification times. A fresh recursive Git checkout makes unchanged RocksDB
+sources newer than the restored `target` artifacts, causing a **full**
+`librocksdb-sys` C++ rebuild even after an exact Cargo cache hit.
+
+The workflow now normalizes timestamps **only inside the clean, SHA-pinned**
+`rust-rocksdb` submodule, before restoring build artifacts. The cache key
+includes its exact Git commit SHA as well as Cargo manifest hashes, so binary
+objects cannot be reused for a different native revision. Timestamp
+normalization refuses a dirty checkout and is restricted to Actions. The
+main project source is left untouched so Cargo can rebuild changed bindings.
+
+This optimization is distinct from caching the `once_cell` Rust crate:
+that crate was already restored on a warm build, while RocksDB's own C++
+objects were still being unnecessarily recompiled.
