@@ -1,20 +1,20 @@
-name: Repackage cp314t wheels with native notices and corrected metadata (no build)
+name: Fix cp314t release wheels and publish (no native rebuild)
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: cp314t-license-preview
+  group: cp314t-release-assets
   cancel-in-progress: false
 
 jobs:
   repack:
     name: Repack four verified wheels without Rust/C++ compilation
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
@@ -92,9 +92,9 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## License-repacked cp314t wheels — preview only"
+            echo "## License-repacked cp314t wheels — verified for release publication"
             echo
-            echo "**No native recompilation. No existing GitHub Release was modified.** Linux 3.14t was smoke-tested; Windows binary bytes were checked without executing on Windows."
+            echo "**No native recompilation.** Linux 3.14t was smoke-tested; Windows binary bytes were checked without executing on Windows."
             echo
             echo "**Legal status:** RocksDB Apache-2.0, inherited LevelDB, Snappy, LZ4, Zstd, zlib and bzip2 texts added, and wheel metadata corrected. Full Rust crate/native dependency compliance review remains pending; not legally certified."
             echo
@@ -113,3 +113,84 @@ jobs:
           path: legal-preview/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Backup BOTH original GitHub Releases before modification
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tag in cp314t-v0.3.29 cp314t-v0.3.29-rocksdb11.8.1; do
+            mkdir -p "release-backup/$tag"
+            gh release download "$tag" --dir "release-backup/$tag"
+            gh release view "$tag" --json body --jq .body > "release-backup/$tag/ORIGINAL_RELEASE_NOTES.md"
+            test "$(find "release-backup/$tag" -maxdepth 1 -name '*.whl' | wc -l)" -eq 2
+            ( cd "release-backup/$tag" && sha256sum -c SHA256SUMS )
+            for wheel in original/"$tag"/*.whl; do
+              cmp -- "$wheel" "release-backup/$tag/$(basename "$wheel")" || {
+                echo "::error::Release $tag no longer matches the original verified wheels. Refusing to publish."
+                exit 1
+              }
+            done
+          done
+
+      - name: Persist backups BEFORE any release asset is changed
+        uses: actions/upload-artifact@v4
+        with:
+          name: ORIGINAL-cp314t-releases-backup-\${{ github.run_id }}
+          path: release-backup/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Update both existing Releases and verify remote SHA256 digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          tags=(cp314t-v0.3.29 cp314t-v0.3.29-rocksdb11.8.1)
+          rollback() {
+            local exit_code="$?"
+            trap - ERR INT TERM
+            echo "::error::Publish failed (status $exit_code); attempting restoration of BOTH original releases."
+            for tag in "\${tags[@]}"; do
+              gh release upload "$tag" "release-backup/$tag/"*.whl "release-backup/$tag/SHA256SUMS" --clobber ||
+                echo "::error::Automatic restore failed for $tag: backups are preserved as Actions artifact."
+              gh release edit "$tag" --notes-file "release-backup/$tag/ORIGINAL_RELEASE_NOTES.md" ||
+                echo "::warning::Could not restore original release notes for $tag."
+            done
+            exit "$exit_code"
+          }
+          trap rollback ERR INT TERM
+          for tag in "\${tags[@]}"; do
+            gh release upload "$tag" "legal-preview/$tag/"*.whl "legal-preview/$tag/SHA256SUMS" --clobber
+            python - "$tag" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+          tag = sys.argv[1]
+          root = Path("legal-preview") / tag
+          release = json.loads(subprocess.check_output(
+              ["gh", "api", f"repos/raled573343/RocksDict/releases/tags/{tag}"], text=True))
+          names = {p.name: p for p in root.iterdir() if p.is_file()}
+          assert len(names) == 3 and len([x for x in names if x.endswith(".whl")]) == 2
+          published = {a["name"]: a for a in release["assets"]}
+          assert set(published) == set(names), (sorted(published), sorted(names))
+          for name, path in names.items():
+              expected = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+              assert published[name]["digest"] == expected, (name, published[name]["digest"], expected)
+          print("GitHub remote digests verified:", tag)
+          PY
+            {
+              cat "release-backup/$tag/ORIGINAL_RELEASE_NOTES.md"
+              echo
+              echo "### Updated cp314t wheels — 2026-10-17"
+              echo
+              echo "Wheel assets repackaged from the exact previously tested native binaries."
+              echo "Original .so/.pyd bytes unchanged. Third-party license notices and accurate"
+              echo "cp314t METADATA included; RECORD and SHA256SUMS regenerated."
+              echo "CI: https://github.com/$GH_REPO/actions/runs/$GITHUB_RUN_ID"
+              echo "Full Rust/native dependency license audit is still open."
+            } > "release-backup/$tag/UPDATED_RELEASE_NOTES.md"
+            gh release edit "$tag" --notes-file "release-backup/$tag/UPDATED_RELEASE_NOTES.md"
+            echo "Published and hash-verified: $tag" >> "$GITHUB_STEP_SUMMARY"
+          done
+          trap - ERR INT TERM
