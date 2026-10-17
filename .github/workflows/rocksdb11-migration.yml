@@ -2,6 +2,11 @@ name: RocksDB 11 migration - manual candidate build
 
 # Explicitly manual: editing code does not trigger native C++ compilations.
 on:
+  # Cargo-manifest changes trigger just the Linux type-check, never wheel builds.
+  # Rust source/code edits do not automatically compile.
+  push:
+    branches: [feat/rocksdb-11-8-1-cp314t]
+    paths: [Cargo.toml]
   workflow_dispatch:
     inputs:
       stage:
@@ -46,7 +51,7 @@ jobs:
 
   check-linux:
     name: First compile pass - Linux Rust/PyO3 only
-    if: inputs.stage == 'check-linux'
+    if: github.event_name == 'push' || inputs.stage == 'check-linux'
     needs: verify-source
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -66,7 +71,9 @@ jobs:
           python-version: '3.14t'
           architecture: x64
       - name: Install pinned Rust compiler
-        uses: dtolnay/rust-toolchain@1.91.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.91.1'
       - name: Install native build prerequisites
         shell: bash
         run: |
@@ -147,7 +154,9 @@ jobs:
         with:
           python-version: '3.14t'
           architecture: x64
-      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.91.1'
       - name: Refresh lockfile for the pinned 11.8.1 pair
         run: cargo generate-lockfile
       - name: Restore native Cargo cache
