@@ -103,7 +103,7 @@ def repack(source: Path, output: Path, tag: str, licenses: Path) -> None:
             + "Original RocksDict: https://github.com/rocksdict/RocksDict\n\n"
             + f"Verified source commit: https://github.com/raled573343/RocksDict/commit/{source_revision}\n\n"
             + f"Original binary release: https://github.com/raled573343/RocksDict/releases/tag/{tag}\n\n"
-            + "Official project documentation, distribution links, licensing and audit status: "
+            + "Independent distribution documentation, release links, licensing and audit status: "
               "https://github.com/raled573343/rocksdict-rocksdb11\n\n"
             + "This post-processed wheel retains the same native extension bytes as the original. "
               "Added license notices do not constitute a full legal audit or safety certification. "
@@ -141,6 +141,14 @@ def repack(source: Path, output: Path, tag: str, licenses: Path) -> None:
             if name.endswith((".so", ".pyd", ".dll")):
                 assert original.read(name) == patched.read(name), f"native binary changed: {name}"
         contents = {name: patched.read(name) for name in patched.namelist()}
+        metadata = contents[root + "METADATA"].decode("utf-8")
+        assert "Classifier: Development Status :: 5 - Production/Stable" not in metadata
+        assert "Classifier: Development Status :: 3 - Alpha" in metadata
+        assert "Summary: Unofficial RocksDict free-threaded CPython 3.14t x64 wheel" in metadata
+        assert "RocksDict / SpeeDict" not in metadata, "old upstream README still embedded"
+        for rel_path in additions:
+            assert f"License-File: {rel_path}" in metadata
+            assert root + "licenses/" + rel_path in contents
         rows = list(csv.reader(io.StringIO(contents[record].decode("utf-8"))))
         assert len(rows) == len(contents)
         assert {row[0] for row in rows} == set(contents)
