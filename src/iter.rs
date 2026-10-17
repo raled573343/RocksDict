@@ -72,7 +72,26 @@ impl RdictIter {
         raw_mode: bool,
         py: Python,
     ) -> PyResult<Self> {
+        Self::new_with_snapshot(db, cf, readopts, pickle_loads, raw_mode, py, None)
+    }
+
+    /// Bind snapshot before creating the native iterator. The read options own
+    /// the bound buffers for the iterator's whole lifetime.
+    pub(crate) fn new_with_snapshot(
+        db: &DbReferenceHolder,
+        cf: &Option<ColumnFamilyHandle>,
+        readopts: ReadOptionsPy,
+        pickle_loads: &Py<PyAny>,
+        raw_mode: bool,
+        py: Python,
+        snapshot: Option<*const librocksdb_sys::rocksdb_snapshot_t>,
+    ) -> PyResult<Self> {
         let readopts = readopts.to_read_opt(raw_mode, py)?;
+        if let Some(snapshot) = snapshot {
+            unsafe {
+                librocksdb_sys::rocksdb_readoptions_set_snapshot(readopts.0, snapshot);
+            }
+        }
 
         let db_inner = db
             .get()

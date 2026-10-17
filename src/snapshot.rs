@@ -4,8 +4,12 @@ use crate::exceptions::DbClosedError;
 use crate::{Rdict, RdictItems, RdictIter, RdictKeys, RdictValues, ReadOptionsPy};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use rocksdb::ReadOptions;
 use crate::compat::{ColumnFamilyHandle, RawDbPtr};
+use crate::options::ReadOpt;
+use crate::util::error_message;
+use rocksdb::AsColumnFamilyRef;
+use libc::{c_char, size_t};
+use std::ptr::null_mut;
 
 /// A consistent view of the database at the point of creation.
 ///
@@ -41,7 +45,7 @@ pub struct Snapshot {
     pub(crate) inner: *const librocksdb_sys::rocksdb_snapshot_t,
     pub(crate) column_family: Option<ColumnFamilyHandle>,
     pub(crate) pickle_loads: Py<PyAny>,
-    pub(crate) read_opt: ReadOptions,
+    pub(crate) read_opt: ReadOpt,
     // decrease db Rc last
     pub(crate) db: DbReferenceHolder,
     pub(crate) raw_mode: bool,
@@ -60,17 +64,14 @@ impl Snapshot {
             None => ReadOptionsPy::default(py)?,
             Some(opt) => opt.clone(),
         };
-        let opt_pointer = read_opt.to_read_opt(self.raw_mode, py)?;
-        unsafe {
-            set_snapshot(opt_pointer.0, self.inner);
-        }
-        RdictIter::new(
+        RdictIter::new_with_snapshot(
             &self.db,
             &self.column_family,
             read_opt,
             &self.pickle_loads,
             self.raw_mode,
             py,
+            Some(self.inner),
         )
     }
 
@@ -133,20 +134,48 @@ impl Snapshot {
 
     /// read from snapshot
     fn __getitem__<'py>(&self, key: &Bound<PyAny>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let db = self.get_db();
         let key = encode_key(key, self.raw_mode)?;
-        let value_result = if let Some(cf) = &self.column_family {
-            db.get_pinned_cf_opt(cf, &key[..], &self.read_opt)
-        } else {
-            db.get_pinned_opt(&key[..], &self.read_opt)
+        let db = self.get_db();
+        let mut value_len: size_t = 0;
+        let mut err: *mut c_char = null_mut();
+        // Native RocksDB 11 owns the returned allocation, which must be freed
+        // using rocksdb_free after we decode/copy its contents.
+        let value = unsafe {
+            match &self.column_family {
+                Some(cf) => librocksdb_sys::rocksdb_get_cf(
+                    db.inner(),
+                    self.read_opt.0,
+                    cf.inner(),
+                    key.as_ptr() as *const c_char,
+                    key.len(),
+                    &mut value_len,
+                    &mut err,
+                ),
+                None => librocksdb_sys::rocksdb_get(
+                    db.inner(),
+                    self.read_opt.0,
+                    key.as_ptr() as *const c_char,
+                    key.len(),
+                    &mut value_len,
+                    &mut err,
+                ),
+            }
         };
-        match value_result {
-            Ok(value) => match value {
-                None => Err(PyException::new_err("key not found")),
-                Some(slice) => decode_value(py, slice.as_ref(), &self.pickle_loads, self.raw_mode),
-            },
-            Err(e) => Err(PyException::new_err(e.to_string())),
+        if !err.is_null() {
+            if !value.is_null() {
+                unsafe { librocksdb_sys::rocksdb_free(value.cast()) };
+            }
+            return Err(PyException::new_err(error_message(err)));
         }
+        if value.is_null() {
+            return Err(PyException::new_err("key not found"));
+        }
+        let decoded = unsafe {
+            let bytes = std::slice::from_raw_parts(value as *const u8, value_len);
+            decode_value(py, bytes, &self.pickle_loads, self.raw_mode)
+        };
+        unsafe { librocksdb_sys::rocksdb_free(value.cast()) };
+        decoded
     }
 }
 
@@ -158,11 +187,11 @@ impl Snapshot {
             .ok_or_else(|| DbClosedError::new_err("DB instance already closed"))?
             .inner();
         let snapshot = unsafe { librocksdb_sys::rocksdb_create_snapshot(db_inner) };
-        let r_opt: ReadOptions = rdict
+        let r_opt: ReadOpt = rdict
             .read_opt_py
-            .to_read_options(rdict.opt_py.raw_mode, py)?;
+            .to_read_opt(rdict.opt_py.raw_mode, py)?;
         unsafe {
-            set_snapshot(r_opt.inner(), snapshot);
+            set_snapshot(r_opt.0, snapshot);
         }
         Ok(Snapshot {
             inner: snapshot,

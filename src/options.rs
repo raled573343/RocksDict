@@ -198,7 +198,12 @@ pub(crate) struct ReadOptionsPy {
     async_io: bool,
 }
 
-pub(crate) struct ReadOpt(pub(crate) *mut librocksdb_sys::rocksdb_readoptions_t);
+/// C read options with bound buffers retained for RocksDB's non-owning pointers.
+/// This prevents the native iterator from reading freed prefix bound memory.
+pub(crate) struct ReadOpt(
+    pub(crate) *mut librocksdb_sys::rocksdb_readoptions_t,
+    Vec<Vec<u8>>,
+);
 
 /// Defines the underlying memtable implementation.
 /// See official [wiki](https://github.com/facebook/rocksdb/wiki/MemTable) for more information.
@@ -2330,10 +2335,10 @@ impl ReadOptionsPy {
     }
 
     pub(crate) fn to_read_opt(&self, raw_mode: bool, py: Python) -> PyResult<ReadOpt> {
-        let opt = unsafe { ReadOpt(librocksdb_sys::rocksdb_readoptions_create()) };
+        let mut opt = unsafe { ReadOpt(librocksdb_sys::rocksdb_readoptions_create(), Vec::new()) };
         if !self.iterate_lower_bound.is_none(py) {
-            let lower_bound = encode_key(self.iterate_lower_bound.bind(py), raw_mode)?;
-
+            opt.1.push(encode_key(self.iterate_lower_bound.bind(py), raw_mode)?.into_owned());
+            let lower_bound = opt.1.last().expect("lower bound just inserted");
             unsafe {
                 librocksdb_sys::rocksdb_readoptions_set_iterate_lower_bound(
                     opt.0,
@@ -2343,8 +2348,8 @@ impl ReadOptionsPy {
             }
         }
         if !self.iterate_upper_bound.is_none(py) {
-            let upper_bound = encode_key(self.iterate_upper_bound.bind(py), raw_mode)?;
-
+            opt.1.push(encode_key(self.iterate_upper_bound.bind(py), raw_mode)?.into_owned());
+            let upper_bound = opt.1.last().expect("upper bound just inserted");
             unsafe {
                 librocksdb_sys::rocksdb_readoptions_set_iterate_upper_bound(
                     opt.0,
