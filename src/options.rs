@@ -168,6 +168,12 @@ pub(crate) struct FlushOptionsPy {
     ///         options.set_wait(False)
     #[pyo3(get, set)]
     pub(crate) wait: bool,
+
+    /// RocksDB 11.8: also wait for flush event listeners after data flush.
+    ///
+    /// This option only takes effect when wait is true. Default: false.
+    #[pyo3(get, set)]
+    pub(crate) listener_wait: bool,
 }
 
 /// ReadOptions allows setting iterator bounds and so on.
@@ -610,6 +616,27 @@ impl OptionsPy {
 
 #[pymethods]
 impl OptionsPy {
+    /// RocksDB 11.8: minimum size of the shared async-read executor.
+    ///
+    /// Opening a DB may increase the shared executor thread count, but will
+    /// never reduce the process-wide count. Default is backend-dependent.
+    pub fn set_read_io_executor_threads(&mut self, threads: i32) -> PyResult<()> {
+        if threads < 0 {
+            return Err(PyException::new_err("read I/O executor threads must be >= 0"));
+        }
+        self.inner_opt.set_read_io_executor_threads(threads);
+        Ok(())
+    }
+
+    pub fn get_read_io_executor_threads(&self) -> i32 {
+        self.inner_opt.get_read_io_executor_threads()
+    }
+
+    /// RocksDB 11: avoid blocking DB::Open on obsolete OPTIONS-file cleanup.
+    pub fn set_avoid_unnecessary_blocking_io(&mut self, enabled: bool) {
+        self.inner_opt.set_avoid_unnecessary_blocking_io(enabled);
+    }
+
     #[new]
     #[pyo3(signature = (raw_mode = false))]
     pub fn new(raw_mode: bool) -> Self {
@@ -2134,7 +2161,7 @@ impl From<&WriteOptionsPy> for WriteOptions {
 impl FlushOptionsPy {
     #[new]
     pub fn new() -> Self {
-        FlushOptionsPy { wait: true }
+        FlushOptionsPy { wait: true, listener_wait: false }
     }
 }
 
@@ -2142,6 +2169,7 @@ impl From<&FlushOptionsPy> for FlushOptions {
     fn from(f_opt: &FlushOptionsPy) -> Self {
         let mut opt = FlushOptions::default();
         opt.set_wait(f_opt.wait);
+        opt.set_listener_wait(f_opt.listener_wait);
         opt
     }
 }
