@@ -1,4 +1,4 @@
-name: Add native license notices to published cp314t wheels (no rebuild)
+name: Repackage cp314t wheels with native notices and corrected metadata (no build)
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
             fi
           done
 
-      - name: Check source SHA-256, append licenses and recalculate RECORD
+      - name: Verify originals, embed notices, correct METADATA, rebuild RECORD
         run: |
           python tools/repack_cp314t_licenses.py original legal-preview LICENSES
 
@@ -94,9 +94,9 @@ jobs:
           {
             echo "## License-repacked cp314t wheels — preview only"
             echo
-            echo "**No native recompilation. No existing GitHub Release was modified.**"
+            echo "**No native recompilation. No existing GitHub Release was modified.** Linux 3.14t was smoke-tested; Windows binary bytes were checked without executing on Windows."
             echo
-            echo "**Legal status:** Apache-2.0 and inherited LevelDB notices added; full license inventory of statically linked compression/runtime components is still pending."
+            echo "**Legal status:** RocksDB Apache-2.0, inherited LevelDB, Snappy, LZ4, Zstd, zlib and bzip2 texts added, and wheel metadata corrected. Full Rust crate/native dependency compliance review remains pending; not legally certified."
             echo
             for tag in cp314t-v0.3.29 cp314t-v0.3.29-rocksdb11.8.1; do
               echo "### $tag"
