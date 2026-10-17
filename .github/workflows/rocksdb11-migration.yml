@@ -1,0 +1,224 @@
+name: RocksDB 11 migration - manual candidate build
+
+# Explicitly manual: editing code does not trigger native C++ compilations.
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "First use check-linux; build Windows/Linux wheels only after Rust API is ported"
+        required: true
+        type: choice
+        default: check-linux
+        options:
+          - check-linux
+          - wheels-both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rocksdb11-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-source:
+    name: Validate migration branch and dependency versions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Assert RocksDB 11 package names (fail before compilation)
+        shell: python
+        run: |
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path("Cargo.toml").read_text())
+          wrapper = data["dependencies"]["rocksdb"]
+          native = data["dependencies"]["librocksdb-sys"]
+          assert wrapper["package"] == "rust-rocksdb"
+          assert wrapper["version"] == "=0.53.0"
+          assert native["package"] == "rust-librocksdb-sys"
+          assert native["version"] == "=0.48.1"
+          assert "raw-ptr" in wrapper["features"]
+          print("RocksDB 11.8.1 dependency pair selected")
+
+  check-linux:
+    name: First compile pass - Linux Rust/PyO3 only
+    if: inputs.stage == 'check-linux'
+    needs: verify-source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: '0'
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          persist-credentials: false
+      - name: Install free-threaded CPython 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14t'
+          architecture: x64
+      - name: Install pinned Rust compiler
+        uses: dtolnay/rust-toolchain@1.91.1
+      - name: Install native build prerequisites
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang libclang-dev cmake pkg-config libssl-dev zlib1g-dev libbz2-dev
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> "$GITHUB_ENV"
+      - name: Restore Rust/C++ compiler artifacts
+        id: build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rocksdb11-check-linux-rust1911-${{ hashFiles('Cargo.toml') }}
+          restore-keys: |
+            rocksdb11-check-linux-rust1911-
+      - name: Resolve dependencies and update candidate lockfile
+        shell: bash
+        run: |
+          cargo generate-lockfile
+          cargo tree -i rust-librocksdb-sys
+      - name: Verify source Python interpreter is no-GIL
+        shell: python
+        run: |
+          import sys, sysconfig
+          assert sys.version_info[:2] == (3,14)
+          assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+          assert not sys._is_gil_enabled()
+      - name: Compile Rust bindings (diagnostic; no wheel or link)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --lib --no-default-features --features bindgen-runtime 2>&1 | tee rocksdb11-cargo-check.log
+      - name: Upload generated Cargo.lock and diagnostics, even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocksdb11-linux-check-${{ github.run_number }}
+          path: |
+            Cargo.lock
+            rocksdb11-cargo-check.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Save warmed native build cache even if type check fails
+        if: always() && steps.build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
+
+  wheels:
+    name: Python 3.14t RocksDB 11 wheels - ${{ matrix.platform }}
+    if: inputs.stage == 'wheels-both'
+    needs: verify-source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: manylinux_2_28_x86_64
+          - runner: windows-2022
+            platform: win_amd64
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14t'
+          architecture: x64
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - name: Refresh lockfile for the pinned 11.8.1 pair
+        run: cargo generate-lockfile
+      - name: Restore native Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rocksdb11-wheels-${{ runner.os }}-${{ matrix.platform }}-rust1911-${{ hashFiles('Cargo.toml') }}
+      - name: Restore Windows LLVM
+        if: runner.os == 'Windows'
+        id: llvm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/llvm-21.1.3
+          key: llvm-21.1.3-windows-2022-x64-v1
+      - name: Install LLVM on Windows cache miss
+        if: runner.os == 'Windows' && steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: KyleMayes/install-llvm-action@v2.0.8
+        with:
+          version: 21.1.3
+          directory: ${{ runner.temp }}/llvm-21.1.3
+      - name: Build Linux x64 candidate wheel
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          rust-toolchain: '1.91.1'
+          target: x86_64
+          manylinux: '2_28'
+          args: >-
+            --release --locked --out dist --no-default-features
+            --features bindgen-runtime --interpreter python3.14t
+          before-script-linux: |
+            dnf install -y clang clang-devel llvm-devel cmake make perl
+      - name: Build Windows x64 candidate wheel
+        if: runner.os == 'Windows'
+        uses: PyO3/maturin-action@v1
+        with:
+          rust-toolchain: '1.91.1'
+          target: x64
+          args: >-
+            --release --locked --out dist --no-default-features
+            --features bindgen-runtime --interpreter python3.14t
+        env:
+          LIBCLANG_PATH: ${{ runner.temp }}/llvm-21.1.3/lib
+          CC: ${{ runner.temp }}/llvm-21.1.3/bin/clang-cl
+          CXX: ${{ runner.temp }}/llvm-21.1.3/bin/clang-cl
+          AR: ${{ runner.temp }}/llvm-21.1.3/bin/llvm-lib
+      - name: Validate ABI and wheel metadata
+        run: python tools/check_python_314t_wheel.py --wheel-only --platform ${{ matrix.platform }}
+      - name: Offline install of newly built wheel
+        run: python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
+      - name: Check no-GIL import, multithreaded access and persistence
+        run: python tools/check_python_314t_wheel.py --platform ${{ matrix.platform }}
+      - name: Run existing Python unit tests
+        run: python -X gil=0 -m unittest discover -v -s test
+      - name: Upload passing candidate wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocksdict-11.8.1-314t-${{ matrix.platform }}-${{ github.run_number }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+      - name: Save native build cache even after failing tests
+        if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

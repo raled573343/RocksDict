@@ -16,14 +16,18 @@ path = "bin/create-cf-db/main.rs"
 test = false
 
 [dependencies]
-rocksdb = { path = "rust-rocksdb", default-features = false, features = [
+# RocksDB 11.8.1 backend: keep Rust import names via Cargo package aliases.
+# The 0.53.0 wrapper and 0.48.1+11.8.1 native crate are one compatible pair.
+# Pin exact releases to avoid silently updating the native engine.
+rocksdb = { package = "rust-rocksdb", version = "=0.53.0", default-features = false, features = [
     "snappy",
     "lz4",
     "zstd",
     "zlib",
     "bzip2",
+    "raw-ptr",
 ] }
-librocksdb-sys = { path = "rust-rocksdb/librocksdb-sys", default-features = false }
+librocksdb-sys = { package = "rust-librocksdb-sys", version = "=0.48.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 num-bigint = "0.4"
