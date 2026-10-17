@@ -1,5 +1,7 @@
 /target
 /.ci-cargo/
+/.ci-dnf/
+/.ci-rustup/
 **/.DS_Store
 .idea
 *.so

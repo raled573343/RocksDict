@@ -110,6 +110,17 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write(f"Cargo compiled-object cache exact hit: **{hit}**\\n\\n")
 
+      - name: Restore Linux RPM downloads and pinned Rust toolchain
+        if: runner.os == 'Linux'
+        id: linux-dependency-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .ci-dnf
+            .ci-rustup
+          # RPM metadata will still be checked by dnf, avoiding stale installs.
+          key: manylinux_2_28-llvm21-rust1911-v1
+
       - name: Install CPython 3.14 free-threaded
         uses: actions/setup-python@v6
         with:
@@ -165,9 +176,11 @@ jobs:
           docker-options: >-
             --volume ${{ github.workspace }}/.ci-cargo/registry:/root/.cargo/registry
             --volume ${{ github.workspace }}/.ci-cargo/git:/root/.cargo/git
+            --volume ${{ github.workspace }}/.ci-dnf:/var/cache/dnf
+            --volume ${{ github.workspace }}/.ci-rustup:/root/.rustup
             --env CARGO_TARGET_DIR=${{ github.workspace }}/target
           before-script-linux: |
-            dnf install -y clang clang-devel llvm-devel cmake make perl
+            dnf --setopt=keepcache=1 install -y clang clang-devel llvm-devel cmake make perl
           args: >-
             --release --locked --out dist --no-default-features
             --features bindgen-runtime --interpreter python3.14t
@@ -214,6 +227,15 @@ jobs:
         with:
           path: ${{ runner.temp }}/llvm-21.1.3
           key: llvm-21.1.3-windows-2022-x64-v1
+
+      - name: Cache Linux RPMs and Rust toolchain even after a failed build
+        if: always() && runner.os == 'Linux' && steps.linux-dependency-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ci-dnf
+            .ci-rustup
+          key: manylinux_2_28-llvm21-rust1911-v1
 
       # Save outputs after compilation, including when a downstream runtime test fails.
       # This caches compiled once_cell and RocksDB C++ objects, not just .crate downloads.

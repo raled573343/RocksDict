@@ -98,3 +98,18 @@ main project source is left untouched so Cargo can rebuild changed bindings.
 This optimization is distinct from caching the `once_cell` Rust crate:
 that crate was already restored on a warm build, while RocksDB's own C++
 objects were still being unnecessarily recompiled.
+
+## Additional cached Linux system dependencies
+
+Linux manylinux jobs bind-mount `/var/cache/dnf` to `.ci-dnf` and preserve
+the pinned Rust 1.91.1 toolchain from `/root/.rustup` in `.ci-rustup`.
+The container's `/root/.cargo/bin` is left intact, ensuring `rustup`
+remains executable. `dnf --setopt=keepcache=1` retains downloaded LLVM,
+Clang, CMake and related RPMs. The OS package manager will still validate
+dependencies on each fresh container; the cached RPM archives and Rust toolchain
+avoid most repeated downloads after the initial warm-up.
+
+The manylinux container image itself is still downloaded on new GitHub-hosted
+runners. Eliminating this last download requires a persistent runner or an
+image caching infrastructure, neither of which is available through the
+repository's current hosted GitHub Actions setup.
