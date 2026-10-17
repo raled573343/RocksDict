@@ -1,7 +1,12 @@
 name: RocksDB 11 migration - manual candidate build
 
-# Explicitly manual. Never compile from push/PR or schedule.
+# Deliberately gated: source commits NEVER compile. Workflow-file edits trigger
+# one Linux check; a commit carrying [build-wheels] triggers the 2-OS build.
 on:
+  push:
+    branches: [feat/rocksdb-11-8-1-cp314t]
+    paths:
+      - .github/workflows/rocksdb11-migration.yml
   workflow_dispatch:
     inputs:
       stage:
@@ -46,7 +51,7 @@ jobs:
 
   check-linux:
     name: First compile pass - Linux Rust/PyO3 only
-    if: inputs.stage == 'check-linux'
+    if: (github.event_name == 'push' && !contains(github.event.head_commit.message, '[build-wheels]')) || (github.event_name == 'workflow_dispatch' && inputs.stage == 'check-linux')
     needs: verify-source
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -130,7 +135,7 @@ jobs:
 
   wheels:
     name: Python 3.14t RocksDB 11 wheels - ${{ matrix.platform }}
-    if: inputs.stage == 'wheels-both'
+    if: (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-wheels]')) || (github.event_name == 'workflow_dispatch' && inputs.stage == 'wheels-both')
     needs: verify-source
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
