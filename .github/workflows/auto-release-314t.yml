@@ -5,7 +5,7 @@ on:
     - cron: '17 4 * * *'
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, ci/python-314t-x64-wheels]
     paths:
       - .github/workflows/auto-release-314t.yml
 
@@ -18,7 +18,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Fast automation syntax check (no Rust build)
+    if: github.ref == 'refs/heads/ci/python-314t-x64-wheels'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify updater parses without compiling anything
+        run: |
+          python -m py_compile tools/auto_release_314t.py
+          python tools/auto_release_314t.py --help
+
   discover:
+    if: github.ref == 'refs/heads/main'
     name: Find the next unpublished upstream version
     runs-on: ubuntu-24.04
     outputs:
