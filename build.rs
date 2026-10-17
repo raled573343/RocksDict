@@ -15,11 +15,19 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src/rocksdb11_bridge.cc");
     println!("cargo:rerun-if-env-changed=DEP_ROCKSDB_INCLUDE");
-    cc::Build::new()
+    // RocksDB 11.8.1 exposes defaulted comparisons and scoped enum imports
+    // requiring C++20. cc-rs/clang-cl otherwise defaults to exceptions OFF
+    // on Windows, but our C ABI bridge catches C++ exceptions and turns them
+    // into Python-visible error statuses.
+    let mut bridge = cc::Build::new();
+    bridge
         .cpp(true)
-        .std("c++17")
+        .std("c++20")
         .include(&include_dir)
         .file("src/rocksdb11_bridge.cc")
-        .warnings(false)
-        .compile("rocksdict_rocksdb11_bridge");
+        .warnings(false);
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        bridge.flag("/EHsc");
+    }
+    bridge.compile("rocksdict_rocksdb11_bridge");
 }
