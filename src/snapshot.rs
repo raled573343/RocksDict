@@ -10,6 +10,7 @@ use crate::util::error_message;
 use rocksdb::AsColumnFamilyRef;
 use libc::{c_char, size_t};
 use std::ptr::null_mut;
+use std::sync::Arc;
 
 /// A consistent view of the database at the point of creation.
 ///
@@ -42,7 +43,8 @@ use std::ptr::null_mut;
 ///         Rdict.destroy("tmp")
 #[pyclass]
 pub struct Snapshot {
-    pub(crate) inner: *const librocksdb_sys::rocksdb_snapshot_t,
+    // Share ownership with iterators; releasing Snapshot must not invalidate them.
+    pub(crate) native: Arc<NativeSnapshot>,
     pub(crate) column_family: Option<ColumnFamilyHandle>,
     pub(crate) pickle_loads: Py<PyAny>,
     pub(crate) read_opt: ReadOpt,
@@ -71,7 +73,7 @@ impl Snapshot {
             &self.pickle_loads,
             self.raw_mode,
             py,
-            Some(self.inner),
+            Some(Arc::clone(&self.native)),
         )
     }
 
@@ -181,20 +183,16 @@ impl Snapshot {
 
 impl Snapshot {
     pub(crate) fn new(rdict: &Rdict, py: Python) -> PyResult<Self> {
-        let db_inner = rdict
-            .db
-            .get()
-            .ok_or_else(|| DbClosedError::new_err("DB instance already closed"))?
-            .inner();
-        let snapshot = unsafe { librocksdb_sys::rocksdb_create_snapshot(db_inner) };
+        // Construct options first: an encoding error must not leak a C snapshot.
         let r_opt: ReadOpt = rdict
             .read_opt_py
             .to_read_opt(rdict.opt_py.raw_mode, py)?;
+        let native = NativeSnapshot::create(&rdict.db)?;
         unsafe {
-            set_snapshot(r_opt.0, snapshot);
+            set_snapshot(r_opt.0, native.inner);
         }
         Ok(Snapshot {
-            inner: snapshot,
+            native,
             column_family: rdict.column_family.clone(),
             pickle_loads: rdict.loads.clone(),
             read_opt: r_opt,
@@ -210,16 +208,45 @@ impl Snapshot {
     }
 }
 
-impl Drop for Snapshot {
-    fn drop(&mut self) {
-        unsafe {
-            librocksdb_sys::rocksdb_release_snapshot(self.get_db().inner(), self.inner);
+/// Owns the native RocksDB snapshot exactly once, and keeps its DB alive.
+///
+/// Iterators retain an Arc to this guard so deleting the public Snapshot
+/// cannot release the native snapshot before iterator destruction.
+pub(crate) struct NativeSnapshot {
+    pub(crate) inner: *const librocksdb_sys::rocksdb_snapshot_t,
+    db: DbReferenceHolder,
+}
+
+impl NativeSnapshot {
+    pub(crate) fn create(db: &DbReferenceHolder) -> PyResult<Arc<Self>> {
+        let ptr = db
+            .get()
+            .ok_or_else(|| DbClosedError::new_err("DB instance already closed"))?
+            .inner();
+        let snapshot = unsafe { librocksdb_sys::rocksdb_create_snapshot(ptr) };
+        if snapshot.is_null() {
+            return Err(PyException::new_err("rocksdb_create_snapshot returned null"));
         }
+        Ok(Arc::new(Self {
+            inner: snapshot,
+            db: db.clone(),
+        }))
     }
 }
 
-/// `Send` and `Sync` implementations for `SnapshotWithThreadMode` are safe, because `SnapshotWithThreadMode` is
-/// immutable and can be safely shared between threads.
+impl Drop for NativeSnapshot {
+    fn drop(&mut self) {
+        // All referencing iterators have dropped their native iterator first.
+        let db = self.db.get().expect("snapshot guard must keep DB alive");
+        unsafe { librocksdb_sys::rocksdb_release_snapshot(db.inner(), self.inner) };
+    }
+}
+
+// RocksDB's immutable snapshot supports concurrent readers. The only
+// mutation happens in Drop when the final Arc reference is released.
+unsafe impl Send for NativeSnapshot {}
+unsafe impl Sync for NativeSnapshot {}
+
 unsafe impl Send for Snapshot {}
 unsafe impl Sync for Snapshot {}
 

@@ -11,6 +11,8 @@ use pyo3::types::{PyList, PyTuple};
 // Wide columns are supplied by crate::wide_columns (RocksDB 11 C++ bridge).
 use rocksdb::AsColumnFamilyRef;
 use crate::compat::{ColumnFamilyHandle, RawDbPtr};
+use crate::snapshot::NativeSnapshot;
+use std::sync::Arc;
 use std::ptr::null_mut;
 use std::sync::Mutex;
 
@@ -31,6 +33,8 @@ pub(crate) struct RdictIter {
     pub(crate) loads: Py<PyAny>,
 
     pub(crate) raw_mode: bool,
+    // Keep native Snapshot alive beyond the Python Snapshot object's lifetime.
+    pub(crate) _snapshot: Option<Arc<NativeSnapshot>>,
 }
 
 #[pyclass]
@@ -84,12 +88,12 @@ impl RdictIter {
         pickle_loads: &Py<PyAny>,
         raw_mode: bool,
         py: Python,
-        snapshot: Option<*const librocksdb_sys::rocksdb_snapshot_t>,
+        snapshot: Option<Arc<NativeSnapshot>>,
     ) -> PyResult<Self> {
         let readopts = readopts.to_read_opt(raw_mode, py)?;
-        if let Some(snapshot) = snapshot {
+        if let Some(snapshot) = &snapshot {
             unsafe {
-                librocksdb_sys::rocksdb_readoptions_set_snapshot(readopts.0, snapshot);
+                librocksdb_sys::rocksdb_readoptions_set_snapshot(readopts.0, snapshot.inner);
             }
         }
 
@@ -113,6 +117,7 @@ impl RdictIter {
             readopts,
             loads: pickle_loads.clone(),
             raw_mode,
+            _snapshot: snapshot,
         })
     }
 }

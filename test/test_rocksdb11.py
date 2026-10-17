@@ -58,6 +58,22 @@ class RocksDB11Integration(unittest.TestCase):
                 db.close()
             Rdict.destroy(db_path)
 
+    def test_iterator_outlives_python_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="rd11-snapiter-") as folder:
+            db_path = str(Path(folder) / "db")
+            db = Rdict(db_path, Options(raw_mode=True))
+            try:
+                db[b"before"] = b"old"
+                snap = db.snapshot()
+                iterator = snap.items()
+                del snap  # Native snapshot must remain owned by iterator.
+                db[b"before"] = b"new"
+                self.assertEqual(list(iterator), [(b"before", b"old")])
+                del iterator
+            finally:
+                db.close()
+            Rdict.destroy(db_path)
+
     def test_read_snapshot_is_stable(self):
         with tempfile.TemporaryDirectory(prefix="rd11-snapshot-") as folder:
             path = str(Path(folder) / "db")
