@@ -56,10 +56,10 @@ def repack(source: Path, output: Path, tag: str, licenses: Path) -> None:
                 f"Original GitHub tag: {tag}\n"
                 f"Original wheel SHA-256: {EXPECTED[tag][source.name]}\n"
                 "RocksDict Python wrapper: MIT; Copyright (c) 2021 Congyu (original LICENSE preserved).\n"
-                "RocksDB native engine: Apache-2.0 option; inherited LevelDB notice included.\\n"
-                "Compression notices: Snappy, LZ4, Zstandard, zlib, bzip2.\\n"
-                "SBOM lists Rust crates and their declared licenses; some are build-only and others linked.\\n"
-                "IMPORTANT: full Rust crate/binary attribution audit is NOT COMPLETE. Not legally certified.\\n"
+                "RocksDB native engine: Apache-2.0 option; inherited LevelDB notice included.\n"
+                "Compression notices: Snappy, LZ4, Zstandard, zlib, bzip2.\n"
+                "SBOM lists Rust crates and their declared licenses; some are build-only and others linked.\n"
+                "IMPORTANT: full Rust crate/binary attribution audit is NOT COMPLETE. Not legally certified.\n"
                 f"Original release: https://github.com/raled573343/RocksDict/releases/tag/{tag}\n"
             ).encode("utf-8"),
         }
@@ -72,7 +72,7 @@ def repack(source: Path, output: Path, tag: str, licenses: Path) -> None:
             "b2958391ddea0530e0f299295f7b5fad43590a3a"
             if is_rocksdb11 else "1ae571fc5b107fc7f22b470fbded1e92ed3e4899"
         )
-        header_lines = header.split("\\n")
+        header_lines = header.split("\n")
         header_lines = [line for line in header_lines if not (
             line.startswith("Classifier: ") or line.startswith("Summary: ")
         )]
@@ -86,28 +86,28 @@ def repack(source: Path, output: Path, tag: str, licenses: Path) -> None:
             "Summary: Unofficial RocksDict free-threaded CPython 3.14t x64 wheel"
                      + (" with RocksDB 11.8.1" if is_rocksdb11 else ""),
         ]
-        header = "\\n".join(header_lines)
+        header = "\n".join(header_lines)
         body = (
-            "# Unofficial RocksDict wheel for free-threaded Python 3.14t\\n\\n"
-            + ("Native RocksDB: **11.8.1** (experimental upgrade).\\n\\n"
+            "# Unofficial RocksDict wheel for free-threaded Python 3.14t\n\n"
+            + ("Native RocksDB: **11.8.1** (experimental upgrade).\n\n"
                if is_rocksdb11 else
-               "Upstream-aligned RocksDict 0.3.29 native engine (no RocksDB 11 upgrade).\\n\\n")
+               "Upstream-aligned RocksDict 0.3.29 native engine (no RocksDB 11 upgrade).\n\n")
             + "This wheel is built specifically for free-threaded CPython 3.14t on "
               "Windows x64 or Linux x86-64 (glibc 2.28+). It is not compatible "
-              "with regular CPython 3.14, macOS, or ARM64.\\n\\n"
+              "with regular CPython 3.14, macOS, or ARM64.\n\n"
             + "Independent community build — not affiliated with or endorsed by "
-              "the RocksDict upstream developers or Meta/RocksDB.\\n\\n"
+              "the RocksDict upstream developers or Meta/RocksDB.\n\n"
             + "**Install the wheel downloaded from the corresponding GitHub Release** "
               "with your Python 3.14t interpreter; the PyPI command "
-              "`pip install rocksdict` does not select these exact builds.\\n\\n"
-            + "Original RocksDict: https://github.com/rocksdict/RocksDict\\n\\n"
-            + f"Verified source commit: https://github.com/raled573343/RocksDict/commit/{source_revision}\\n\\n"
-            + f"Original binary release: https://github.com/raled573343/RocksDict/releases/tag/{tag}\\n\\n"
+              "`pip install rocksdict` does not select these exact builds.\n\n"
+            + "Original RocksDict: https://github.com/rocksdict/RocksDict\n\n"
+            + f"Verified source commit: https://github.com/raled573343/RocksDict/commit/{source_revision}\n\n"
+            + f"Original binary release: https://github.com/raled573343/RocksDict/releases/tag/{tag}\n\n"
             + "Official project documentation, distribution links, licensing and audit status: "
-              "https://github.com/raled573343/rocksdict-rocksdb11\\n\\n"
+              "https://github.com/raled573343/rocksdict-rocksdb11\n\n"
             + "This post-processed wheel retains the same native extension bytes as the original. "
               "Added license notices do not constitute a full legal audit or safety certification. "
-              "Test concurrent database workloads and back up data before trying newer RocksDB.\\n"
+              "Test concurrent database workloads and back up data before trying newer RocksDB.\n"
         )
         for relative_path, contents in additions.items():
             assert contents, relative_path
