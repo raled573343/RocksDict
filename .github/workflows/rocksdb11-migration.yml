@@ -192,10 +192,24 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
+            .ci-cargo/registry
+            .ci-cargo/git
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rocksdb11-wheels-${{ runner.os }}-${{ matrix.platform }}-rust1911-${{ hashFiles('Cargo.toml') }}
+          key: rocksdb11-wheels-v2-${{ runner.os }}-${{ matrix.platform }}-rust1911-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'vendor/rust-rocksdb/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            rocksdb11-wheels-v2-${{ runner.os }}-${{ matrix.platform }}-rust1911-
+      - name: Restore Linux RPM and pinned Rust toolchain
+        if: runner.os == 'Linux'
+        id: linux-dependency-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .ci-dnf
+            .ci-rustup
+          key: manylinux_2_28-llvm21-rust1911-v1
+
       - name: Restore Windows LLVM
         if: runner.os == 'Windows'
         id: llvm-cache
@@ -209,6 +223,16 @@ jobs:
         with:
           version: 21.1.3
           directory: ${{ runner.temp }}/llvm-21.1.3
+      - name: Verify cached or installed Windows Clang
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $llvm = Join-Path '${{ runner.temp }}' 'llvm-21.1.3'
+          if (-not (Test-Path (Join-Path $llvm 'bin/clang-cl.exe'))) {
+            throw "LLVM cache or installation is missing clang-cl.exe"
+          }
+          (Join-Path $llvm 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Build Linux x64 candidate wheel
         if: runner.os == 'Linux'
         uses: PyO3/maturin-action@v1
@@ -216,11 +240,17 @@ jobs:
           rust-toolchain: '1.91.1'
           target: x86_64
           manylinux: '2_28'
+          docker-options: >-
+            --volume ${{ github.workspace }}/.ci-cargo/registry:/root/.cargo/registry
+            --volume ${{ github.workspace }}/.ci-cargo/git:/root/.cargo/git
+            --volume ${{ github.workspace }}/.ci-dnf:/var/cache/dnf
+            --volume ${{ github.workspace }}/.ci-rustup:/root/.rustup
+            --env CARGO_TARGET_DIR=${{ github.workspace }}/target
           args: >-
             --release --locked --out dist --no-default-features
             --features bindgen-runtime --interpreter python3.14t
           before-script-linux: |
-            dnf install -y clang clang-devel llvm-devel cmake make perl
+            dnf --setopt=keepcache=1 install -y clang clang-devel llvm-devel cmake make perl
       - name: Build Windows x64 candidate wheel
         if: runner.os == 'Windows'
         uses: PyO3/maturin-action@v1
@@ -251,12 +281,94 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 30
+      - name: Save cold Windows LLVM installation
+        if: always() && runner.os == 'Windows' && steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/llvm-21.1.3
+          key: llvm-21.1.3-windows-2022-x64-v1
+
+      - name: Save Linux RPM and Rust toolchain caches
+        if: always() && runner.os == 'Linux' && steps.linux-dependency-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ci-dnf
+            .ci-rustup
+          key: manylinux_2_28-llvm21-rust1911-v1
+
       - name: Save native build cache even after failing tests
         if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
+            .ci-cargo/registry
+            .ci-cargo/git
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  publish:
+    name: Publish tested RocksDB 11.8.1 GitHub Release
+    needs: [verify-source, wheels]
+    if: >-
+      needs.verify-source.result == 'success' &&
+      needs.wheels.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: cp314t-v0.3.29-rocksdb11.8.1
+    steps:
+      - name: Checkout exact tested application source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fetch only this run's two passing wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rocksdict-11.8.1-314t-*-${{ github.run_number }}
+          merge-multiple: true
+          path: dist
+
+      - name: Independently verify both wheel ABI tags and checksums
+        run: python tools/rocksdb11_release.py --dist dist --project pyproject.toml
+
+      - name: Publish exactly one versioned GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## RocksDict 0.3.29 + RocksDB 11.8.1"
+            echo
+            echo "Native engine: **RocksDB 11.8.1**; Rust binding: **rust-rocksdb 0.53.0**."
+            echo "Python ABI: **CPython 3.14t, free-threaded**, Windows x64 and Linux x86-64 (glibc 2.28+)."
+            echo
+            echo "These are separate experimental RocksDB 11 binaries; the official upstream version stays unchanged."
+            echo "Both wheels passed build, local no-index install, no-GIL smoke, native RocksDB version and unit tests."
+            echo "Tested commit: \`$GITHUB_SHA\`; Actions run: \`#$GITHUB_RUN_ID\`."
+            echo "SHA256SUMS contains cryptographic hashes for both wheel files."
+            echo
+            echo "Do not downgrade an on-disk DB modified by RocksDB 11 with RocksDB 9."
+          } > release-notes.md
+          if gh release view "$RELEASE_TAG" --json isDraft >/dev/null 2>&1; then
+            existing="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+            if [[ "$existing" != "true" ]]; then
+              echo "::error::Published release already exists; refusing overwrite."
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" dist/*.whl dist/SHA256SUMS --clobber
+            gh release edit "$RELEASE_TAG" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" dist/*.whl dist/SHA256SUMS \
+              --draft --target "$GITHUB_SHA" \
+              --title "RocksDict 0.3.29 + RocksDB 11.8.1 — CPython 3.14t x64" \
+              --notes-file release-notes.md
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false
+          gh release view "$RELEASE_TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
