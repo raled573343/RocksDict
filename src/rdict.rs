@@ -1272,6 +1272,27 @@ impl Rdict {
         .map_err(|e| PyException::new_err(e.to_string()))
     }
 
+    /// Verify checksums of the database's persisted SST files (RocksDB 11).
+    ///
+    /// This can trigger substantial disk I/O. It runs outside the Python GIL,
+    /// and surfaces native corruption or I/O errors instead of suppressing them.
+    #[pyo3(signature = (read_opt = None))]
+    fn verify_file_checksums(
+        &self,
+        read_opt: Option<&ReadOptionsPy>,
+        py: Python,
+    ) -> PyResult<()> {
+        let db = self.get_db()?;
+        let options = read_opt
+            .map(|opts| opts.to_read_options(self.opt_py.raw_mode, py))
+            .transpose()?;
+        py.detach(|| match options.as_ref() {
+            Some(options) => db.verify_file_checksums_opt(options),
+            None => db.verify_file_checksums(),
+        })
+        .map_err(|err| PyException::new_err(err.to_string()))
+    }
+
     /// The sequence number of the most recent transaction.
     fn latest_sequence_number(&self) -> PyResult<u64> {
         Ok(self.get_db()?.latest_sequence_number())

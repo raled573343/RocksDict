@@ -154,6 +154,18 @@ class RocksDB11Integration(unittest.TestCase):
                 db.close()
             Rdict.destroy(path)
 
+    def test_verify_native_file_checksums(self):
+        with tempfile.TemporaryDirectory(prefix="rd11-checksums-") as folder:
+            path = str(Path(folder) / "db")
+            db = Rdict(path, Options(raw_mode=True))
+            try:
+                db[b"key"] = b"value"
+                db.flush()
+                db.verify_file_checksums()
+            finally:
+                db.close()
+            Rdict.destroy(path)
+
     def test_column_family_options_reload(self):
         with tempfile.TemporaryDirectory(prefix="rd11-cf-") as folder:
             path = str(Path(folder) / "db")
