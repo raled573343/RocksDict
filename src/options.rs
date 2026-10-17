@@ -3108,6 +3108,66 @@ impl IngestExternalFileOptionsPy {
     pub fn set_ingest_behind(&mut self, v: bool) {
         self.0.set_ingest_behind(v)
     }
+
+    /// Permit ingestion of files emitted directly by the database.
+    pub fn set_allow_db_generated_files(&mut self, enabled: bool) {
+        self.0.set_allow_db_generated_files(enabled)
+    }
+
+    /// Fall back to copying SST files if the move operation fails.
+    pub fn set_failed_move_fall_back_to_copy(&mut self, enabled: bool) {
+        self.0.set_failed_move_fall_back_to_copy(enabled)
+    }
+
+    /// Number of native file-opening worker threads used during ingest.
+    pub fn set_file_opening_threads(&mut self, count: i32) -> PyResult<()> {
+        if count < 1 {
+            return Err(PyException::new_err("file_opening_threads must be >= 1"));
+        }
+        self.0.set_file_opening_threads(count);
+        Ok(())
+    }
+
+    /// Whether index and filter blocks are admitted to the cache on ingest.
+    pub fn set_fill_cache(&mut self, enabled: bool) {
+        self.0.set_fill_cache(enabled)
+    }
+
+    /// Hard-link source files instead of copying them when supported.
+    /// Keep disabled unless the source storage and filesystem support links.
+    pub fn set_link_files(&mut self, enabled: bool) {
+        self.0.set_link_files(enabled)
+    }
+
+    /// Prefetch last-level index/filter metadata after external file ingestion.
+    pub fn set_prefetch_lmax_index_and_filter_blocks(&mut self, enabled: bool) {
+        self.0.set_prefetch_lmax_index_and_filter_blocks(enabled)
+    }
+
+    /// Verify data-block checksums before admitting the external SST.
+    pub fn set_verify_checksums_before_ingest(&mut self, enabled: bool) {
+        self.0.set_verify_checksums_before_ingest(enabled)
+    }
+
+    pub fn set_verify_checksums_readahead_size(&mut self, bytes: usize) {
+        self.0.set_verify_checksums_readahead_size(bytes)
+    }
+
+    /// Verify the external SST's file checksum if available.
+    pub fn set_verify_file_checksum(&mut self, enabled: bool) {
+        self.0.set_verify_file_checksum(enabled)
+    }
+
+    /// Write the global sequence number into the external SST.
+    pub fn set_write_global_seqno(&mut self, enabled: bool) {
+        self.0.set_write_global_seqno(enabled)
+    }
+
+    /// Fail ingestion rather than placing the file above the bottom level.
+    pub fn set_fail_if_not_bottommost_level(&mut self, enabled: bool) {
+        self.0.set_fail_if_not_bottommost_level(enabled)
+    }
+
 }
 
 #[pymethods]

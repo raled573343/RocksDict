@@ -47,6 +47,23 @@ class RocksDB11Integration(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "TTL cannot be negative"):
                 Rdict(str(Path(folder) / "db"), access_type=AccessType.with_ttl(-1))
 
+    def test_native_11_ingest_option_controls(self):
+        from rocksdict import IngestExternalFileOptions
+        options = IngestExternalFileOptions()
+        options.set_file_opening_threads(4)
+        options.set_failed_move_fall_back_to_copy(True)
+        options.set_allow_db_generated_files(True)
+        options.set_fill_cache(False)
+        options.set_link_files(False)
+        options.set_prefetch_lmax_index_and_filter_blocks(True)
+        options.set_verify_checksums_before_ingest(True)
+        options.set_verify_checksums_readahead_size(256 * 1024)
+        options.set_verify_file_checksum(True)
+        options.set_write_global_seqno(True)
+        options.set_fail_if_not_bottommost_level(True)
+        with self.assertRaisesRegex(Exception, "file_opening_threads"):
+            options.set_file_opening_threads(0)
+
     def test_native_11_options(self):
         opts = Options(raw_mode=True)
         opts.set_read_io_executor_threads(2)
