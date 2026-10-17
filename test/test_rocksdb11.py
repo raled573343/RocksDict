@@ -37,10 +37,10 @@ class RocksDB11Integration(unittest.TestCase):
             try:
                 db.put_entity(
                     b"record1",
-                    [b"", b"size", b"color"],
-                    [b"original", b"42", b"blue"],
+                    [b"", b"color", b"size"],
+                    [b"original", b"blue", b"42"],
                 )
-                expected = [(b"", b"original"), (b"size", b"42"), (b"color", b"blue")]
+                expected = [(b"", b"original"), (b"color", b"blue"), (b"size", b"42")]
                 self.assertEqual(db.get_entity(b"record1"), expected)
                 self.assertIsNone(db.get_entity(b"missing"))
                 # Native iterator::columns() is a distinct API from DB::GetEntity.
@@ -52,7 +52,7 @@ class RocksDB11Integration(unittest.TestCase):
             try:
                 self.assertEqual(
                     db.get_entity(b"record1"),
-                    [(b"", b"original"), (b"size", b"42"), (b"color", b"blue")],
+                    [(b"", b"original"), (b"color", b"blue"), (b"size", b"42")],
                 )
             finally:
                 db.close()
