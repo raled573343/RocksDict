@@ -9,7 +9,7 @@ use crate::options::ReadOpt;
 use crate::util::error_message;
 use libc::{c_char, c_int, c_uint, size_t};
 use pyo3::exceptions::PyException;
-use pyo3::PyResult;
+use pyo3::{PyErr, PyResult};
 use rocksdb::{AsColumnFamilyRef, DBWithThreadMode, MultiThreaded};
 use std::ptr::null_mut;
 

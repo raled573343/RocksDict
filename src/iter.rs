@@ -8,7 +8,7 @@ use libc::{c_char, c_uchar, size_t};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
-use rocksdb::wide_columns::{Iterable as _, WideColumns};
+// Wide columns are supplied by crate::wide_columns (RocksDB 11 C++ bridge).
 use rocksdb::AsColumnFamilyRef;
 use crate::compat::{ColumnFamilyHandle, RawDbPtr};
 use std::ptr::null_mut;
