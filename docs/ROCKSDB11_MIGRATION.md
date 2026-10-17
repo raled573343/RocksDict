@@ -1,3 +1,66 @@
+## Implementation checkpoint — source prepared, compilation intentionally paused
+
+The migration branch contains an actual RocksDB 11.8.1 port, not merely an
+architecture document. Its implementation now includes:
+
+- One vendored Rust wrapper based on `zaidoon1/rust-rocksdb@c8b2e2c3a6939ea2cd35ff073c10b1e431615d88`
+  (version 0.53.0). All 51 upstream Rust source/manifest/license files are
+  present; only its Cargo manifest and `ColumnFamilyDescriptor` accessor differ.
+- One native engine dependency `rust-librocksdb-sys =0.48.1`, whose vendored
+  Facebook RocksDB version is 11.8.1. The old `rust-rocksdb` Git submodule
+  and its `.gitmodules` entry have been removed **from this branch only**.
+- `src/compat.rs`: lifetime-aware column-family handles and public raw-pointer
+  access, without assuming the private layout of rust-rocksdb Rust types.
+- `src/rocksdb11_bridge.cc` + `src/wide_columns.rs`: owned C ABI wrappers for
+  RocksDB 11 GetEntity, PutEntity and iterator columns; exact native version
+  compile-time check `ROCKSDB_MAJOR/MINOR/PATCH == 11/8/1`.
+- `src/snapshot.rs`, `src/iter.rs`, `src/options.rs`: snapshot read path,
+  lifetime-safe iterator bounds and new RocksDB 11.8 options.
+- Python `native_rocksdb_version()`, typing stubs, and
+  `test/test_rocksdb11.py` for native ABI, snapshots, wide columns and no-GIL.
+- Candidate package version `0.3.29+rocksdb11.8.1`, separate from published
+  `0.3.29` wheels.
+
+### Completed non-build checks
+
+- All 51 expected vendor files exist; only the two documented intentional
+  source changes differ from upstream.
+- Cargo manifests point to the **same** 11.8.1 native dependency. The application
+  enables `multi-threaded-cf`, `raw-ptr` and PyO3 0.27 no-GIL opt-in.
+- Unused 9.8.4 Rust submodule was removed from the migration branch.
+- GitHub Actions in this branch is **workflow_dispatch only**, so source edits
+  cannot trigger full native rebuilds. `main` and the established 9.x wheel
+  releases are unchanged.
+
+### Pending, and not falsely marked as passed
+
+- **Cargo.lock:** the checked-in lockfile still reflects the old 9.x backend.
+  The next controlled `check-linux` run must regenerate the lock for the
+  local vendored package and commit the resulting lockfile.
+- **Compilation:** Rust/C++ source compatibility is not yet compiler-verified.
+  The pre-port diagnostic run failed in the native build script because the
+  workflow supplied an empty `LIBCLANG_PATH`. The workflow now searches for
+  the installed libclang library and fails immediately if absent.
+- The new C++ bridge follows the private C API wrapper representation from
+  RocksDB 11.8.1 `db/c.cc`. That is intentionally version-pinned and **must**
+  receive extra build/runtime review and C++ exception/memory-safety testing
+  before release. Native source changes or system-linked RocksDB are not
+  supported without revisiting it.
+- **No new candidate wheels** have been built; no integration test has passed.
+  In particular, the Python 3.14t no-GIL and 9.x DB-copy upgrade gates remain
+  open. Do not publish or merge to `main` before those pass.
+
+### Next controlled build action (only when approved)
+
+Use **Actions → RocksDB 11 migration - manual candidate build** on
+`feat/rocksdb-11-8-1-cp314t`, stage `check-linux`. This resolves
+`Cargo.lock` and yields precise Rust errors, compiling only Linux.
+Port any remaining APIs based on *those errors*. Only after the full
+Linux compile passes, explicitly dispatch `wheels-both` for Windows and
+manylinux tests. Never bypass acceptance gates with `|| true`.
+
+---
+
 # RocksDict → RocksDB 11.8.1: implementation contract
 
 **Status:** Migration specification created; Rust code not yet ported. Do not release this branch.
