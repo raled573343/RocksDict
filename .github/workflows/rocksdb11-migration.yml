@@ -6,7 +6,9 @@ on:
   # Rust source/code edits do not automatically compile.
   push:
     branches: [feat/rocksdb-11-8-1-cp314t]
-    paths: [Cargo.toml]
+    paths:
+      - Cargo.toml
+      - .github/workflows/rocksdb11-migration.yml
   workflow_dispatch:
     inputs:
       stage:
@@ -210,7 +212,8 @@ jobs:
       - name: Validate ABI and wheel metadata
         run: python tools/check_python_314t_wheel.py --wheel-only --platform ${{ matrix.platform }}
       - name: Offline install of newly built wheel
-        run: python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
+        run: |
+          python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
       - name: Check no-GIL import, multithreaded access and persistence
         run: python tools/check_python_314t_wheel.py --platform ${{ matrix.platform }}
       - name: Run existing Python unit tests
