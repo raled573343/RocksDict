@@ -344,6 +344,11 @@ jobs:
       - name: Focused RocksDB11 regression tests with crash traceback
         run: python -X gil=0 -X faulthandler -m unittest -v test.test_rocksdb11
 
+      - name: Legacy wide-column compatibility tests (fast gate before full suite)
+        run: >-
+          python -X gil=0 -X faulthandler -m unittest discover
+          -v -s test -p test_rdict.py -k test_put_wide_columns
+
       - name: Existing Python unit tests with crash traceback
         run: python -X gil=0 -X faulthandler -m unittest discover -v -s test
       - name: Upload passing candidate wheels
