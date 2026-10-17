@@ -122,6 +122,40 @@ impl RdictIter {
     }
 }
 
+// Internal helper: never export raw iterator buffers to Python as an API.
+impl RdictIter {
+    /// Copy the current buffer while holding the iterator mutex.
+    ///
+    /// The C API returns non-owning memory invalidated by Seek/Next/Prev;
+    /// never release the lock before copying it or decode arbitrary Python
+    /// objects while holding an internal RocksDB lock.
+    fn copy_buffer(&self, key: bool) -> PyResult<Option<Vec<u8>>> {
+        let guard = self.inner.lock().unwrap();
+        let iter = *guard;
+        if unsafe { librocksdb_sys::rocksdb_iter_valid(iter) } == 0 {
+            return Ok(None);
+        }
+        let mut len: size_t = 0;
+        let ptr = unsafe {
+            if key {
+                librocksdb_sys::rocksdb_iter_key(iter, &mut len)
+            } else {
+                librocksdb_sys::rocksdb_iter_value(iter, &mut len)
+            }
+        };
+        if ptr.is_null() && len > 0 {
+            return Err(PyException::new_err("RocksDB iterator returned null buffer"));
+        }
+        let copied = if len == 0 {
+            Vec::new()
+        } else {
+            unsafe { slice::from_raw_parts(ptr as *const u8, len).to_vec() }
+        };
+        Ok(Some(copied))
+    }
+
+}
+
 #[pymethods]
 impl RdictIter {
     /// Returns `true` if the iterator is valid. An iterator is invalidated when
@@ -289,36 +323,6 @@ impl RdictIter {
         unsafe {
             librocksdb_sys::rocksdb_iter_prev(*self.inner.lock().unwrap());
         }
-    }
-
-    /// Copy the current buffer while holding the iterator mutex.
-    ///
-    /// The C API returns non-owning memory invalidated by Seek/Next/Prev;
-    /// never release the lock before copying it or decode arbitrary Python
-    /// objects while holding an internal RocksDB lock.
-    fn copy_buffer(&self, key: bool) -> PyResult<Option<Vec<u8>>> {
-        let guard = self.inner.lock().unwrap();
-        let iter = *guard;
-        if unsafe { librocksdb_sys::rocksdb_iter_valid(iter) } == 0 {
-            return Ok(None);
-        }
-        let mut len: size_t = 0;
-        let ptr = unsafe {
-            if key {
-                librocksdb_sys::rocksdb_iter_key(iter, &mut len)
-            } else {
-                librocksdb_sys::rocksdb_iter_value(iter, &mut len)
-            }
-        };
-        if ptr.is_null() && len > 0 {
-            return Err(PyException::new_err("RocksDB iterator returned null buffer"));
-        }
-        let copied = if len == 0 {
-            Vec::new()
-        } else {
-            unsafe { slice::from_raw_parts(ptr as *const u8, len).to_vec() }
-        };
-        Ok(Some(copied))
     }
 
     /// Return the key at the current iterator position.
