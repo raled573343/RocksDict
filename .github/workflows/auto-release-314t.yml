@@ -1,0 +1,317 @@
+name: Daily upstream RocksDict cp314t releases
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/auto-release-314t.yml
+
+permissions:
+  contents: read
+
+# Prevent duplicate tagged releases across scheduled, manual and bootstrap runs.
+concurrency:
+  group: upstream-cp314t-release
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Find the next unpublished upstream version
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.inspect.outputs.mode }}
+      version: ${{ steps.inspect.outputs.version }}
+      tag: ${{ steps.inspect.outputs.tag }}
+      upstream_sha: ${{ steps.inspect.outputs.upstream_sha }}
+      run_id: ${{ steps.inspect.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: inspect
+        name: Check upstream stable releases and fork publication status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/auto_release_314t.py check
+      - name: Report no-op
+        if: steps.inspect.outputs.mode == 'none'
+        run: echo "Upstream has no unpublished new stable version. No builders started." >> "$GITHUB_STEP_SUMMARY"
+
+  wheels:
+    name: Build ${{ needs.discover.outputs.version }} for ${{ matrix.platform }}
+    needs: discover
+    if: needs.discover.outputs.mode == 'build'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: manylinux_2_28_x86_64
+          - runner: windows-2022
+            platform: win_amd64
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - name: Checkout controlled CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: ci
+          persist-credentials: false
+
+      - name: Checkout exact released upstream commit (not latest main)
+        uses: actions/checkout@v4
+        with:
+          repository: rocksdict/RocksDict
+          ref: ${{ needs.discover.outputs.upstream_sha }}
+          path: upstream
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Normalize clean upstream native source timestamps
+        working-directory: upstream
+        run: python ../ci/tools/normalize_rocksdb_mtime.py
+
+      - name: Validate version and opt-in for PyO3 free-threading
+        run: >-
+          python ci/tools/auto_release_314t.py prepare
+          --source upstream
+          --version ${{ needs.discover.outputs.version }}
+          --sha ${{ needs.discover.outputs.upstream_sha }}
+
+      - name: Restore Cargo native object cache
+        id: cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .ci-cargo/registry
+            .ci-cargo/git
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cp314t-upstream-v1-${{ runner.os }}-${{ matrix.platform }}-${{ needs.discover.outputs.upstream_sha }}-rust1911-${{ hashFiles('upstream/Cargo.lock', 'upstream/Cargo.toml', 'upstream/rust-rocksdb/Cargo.toml') }}
+
+      - name: Restore Linux system dependencies
+        if: runner.os == 'Linux'
+        id: linux-deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .ci-dnf
+            .ci-rustup
+          key: manylinux_2_28-llvm21-rust1911-v1
+
+      - name: Install free-threaded Python interpreter
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14t'
+          architecture: x64
+
+      - name: Verify target interpreter is x64 and GIL is off
+        shell: python
+        run: |
+          import platform, sys, sysconfig
+          assert sys.version_info[:2] == (3, 14)
+          assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1
+          assert not sys._is_gil_enabled()
+          assert platform.machine().lower() in ("amd64", "x86_64")
+
+      - name: Restore cached Windows LLVM/Clang
+        if: runner.os == 'Windows'
+        id: llvm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/llvm-21.1.3
+          key: llvm-21.1.3-windows-2022-x64-v1
+
+      - name: Install Windows LLVM/Clang on cold cache
+        if: runner.os == 'Windows' && steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: KyleMayes/install-llvm-action@v2.0.8
+        with:
+          version: 21.1.3
+          directory: ${{ runner.temp }}/llvm-21.1.3
+
+      - name: Add Windows LLVM tools to PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $llvm = Join-Path '${{ runner.temp }}' 'llvm-21.1.3'
+          if (-not (Test-Path (Join-Path $llvm 'bin/clang-cl.exe'))) {
+            throw "LLVM installation is incomplete: $llvm"
+          }
+          (Join-Path $llvm 'bin') | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build cp314t manylinux_2_28 wheel
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: upstream
+          rust-toolchain: '1.91.1'
+          target: x86_64
+          manylinux: '2_28'
+          docker-options: >-
+            --volume ${{ github.workspace }}/.ci-cargo/registry:/root/.cargo/registry
+            --volume ${{ github.workspace }}/.ci-cargo/git:/root/.cargo/git
+            --volume ${{ github.workspace }}/.ci-dnf:/var/cache/dnf
+            --volume ${{ github.workspace }}/.ci-rustup:/root/.rustup
+            --env CARGO_TARGET_DIR=${{ github.workspace }}/target
+          before-script-linux: |
+            dnf --setopt=keepcache=1 install -y clang clang-devel llvm-devel cmake make perl
+          args: >-
+            --release --locked --out dist --no-default-features
+            --features bindgen-runtime --interpreter python3.14t
+
+      - name: Build cp314t Windows x64 wheel
+        if: runner.os == 'Windows'
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: upstream
+          rust-toolchain: '1.91.1'
+          target: x64
+          args: >-
+            --release --locked --out dist --no-default-features
+            --features bindgen-runtime --interpreter python3.14t
+        env:
+          LIBCLANG_PATH: ${{ runner.temp }}/llvm-21.1.3/lib
+          CC: ${{ runner.temp }}/llvm-21.1.3/bin/clang-cl
+          CXX: ${{ runner.temp }}/llvm-21.1.3/bin/clang-cl
+          AR: ${{ runner.temp }}/llvm-21.1.3/bin/llvm-lib
+
+      - name: Verify wheel tag
+        working-directory: upstream
+        run: python ../ci/tools/check_python_314t_wheel.py --wheel-only --platform ${{ matrix.platform }}
+
+      - name: Install built wheel without access to PyPI
+        working-directory: upstream
+        run: |
+          python -m pip install --no-index --no-deps --only-binary=:all: --find-links dist --force-reinstall rocksdict
+
+      - name: No-GIL smoke and concurrent RocksDB persistence checks
+        working-directory: upstream
+        run: python ../ci/tools/check_python_314t_wheel.py --platform ${{ matrix.platform }}
+
+      - name: Upstream Python unit tests, no GIL
+        working-directory: upstream
+        run: python -X gil=0 -m unittest discover -v -s test
+
+      - name: Upload verified per-OS wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-cp314t-${{ needs.discover.outputs.version }}-${{ matrix.platform }}
+          path: upstream/dist/*.whl
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Save cold Windows LLVM cache
+        if: always() && runner.os == 'Windows' && steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/llvm-21.1.3
+          key: llvm-21.1.3-windows-2022-x64-v1
+
+      - name: Save cold Linux RPM and Rust caches
+        if: always() && runner.os == 'Linux' && steps.linux-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ci-dnf
+            .ci-rustup
+          key: manylinux_2_28-llvm21-rust1911-v1
+
+      - name: Save compiled Rust/RocksDB objects
+        if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ci-cargo/registry
+            .ci-cargo/git
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  release:
+    name: Publish exactly one GitHub Release per version
+    needs: [discover, wheels]
+    if: >-
+      always() &&
+      needs.discover.result == 'success' &&
+      (needs.discover.outputs.mode == 'bootstrap' ||
+       (needs.discover.outputs.mode == 'build' && needs.wheels.result == 'success'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TARGET_VERSION: ${{ needs.discover.outputs.version }}
+      UPSTREAM_TAG: ${{ needs.discover.outputs.tag }}
+      UPSTREAM_SHA: ${{ needs.discover.outputs.upstream_sha }}
+      SOURCE_MODE: ${{ needs.discover.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Publication-only initial import. This is the already passed cp314t run.
+      # Absolutely no Maturin/Rust jobs are started in bootstrap mode.
+      - name: Reuse existing successful 0.3.29 wheel bundle
+        if: needs.discover.outputs.mode == 'bootstrap'
+        env:
+          SOURCE_RUN_ID: ${{ needs.discover.outputs.run_id }}
+        run: |
+          mkdir -p dist
+          gh run download "$SOURCE_RUN_ID" --name rocksdict-python-314t-x64-complete --dir dist
+
+      - name: Collect freshly tested Windows/Linux wheels
+        if: needs.discover.outputs.mode == 'build'
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: new-cp314t-${{ needs.discover.outputs.version }}-*
+          merge-multiple: true
+
+      - name: Enforce two matching wheel ABI tags and write SHA256SUMS
+        run: |
+          python tools/auto_release_314t.py verify-dist --dist dist --version "$TARGET_VERSION"
+
+      - name: Publish a single recoverable versioned Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="cp314t-v$TARGET_VERSION"
+          {
+            echo "## RocksDict $TARGET_VERSION — CPython 3.14t, GIL disabled"
+            echo
+            echo "- Upstream release: https://github.com/rocksdict/RocksDict/releases/tag/$UPSTREAM_TAG"
+            echo "- Upstream source commit: \`$UPSTREAM_SHA\`"
+            if [[ "$SOURCE_MODE" == "bootstrap" ]]; then
+              echo "- Built and tested once from fork commit \`1ae571fc5b107fc7f22b470fbded1e92ed3e4899\`, run #39024425551. No recompilation."
+            else
+              echo "- Built from the pinned upstream commit with the fork's cp314t PyO3 compatibility changes."
+            fi
+            echo "- Platforms: Windows x64; Linux x86-64 (glibc 2.28+)."
+            echo "- Python ABI: \`cp314-cp314t\`, NOT regular CPython 3.14."
+            echo "- \`SHA256SUMS\` included for binary integrity verification."
+            echo
+            echo "All wheels were installed locally and passed the no-GIL import/smoke and Python unit tests in GitHub Actions."
+          } > release-notes.md
+
+          if gh release view "$tag" --json isDraft >/dev/null 2>&1; then
+            # Interrupted prior publication can be safely resumed.
+            gh release upload "$tag" dist/*.whl dist/SHA256SUMS --clobber
+            gh release edit "$tag" --notes-file release-notes.md
+          else
+            gh release create "$tag" dist/*.whl dist/SHA256SUMS \
+              --draft --target "$GITHUB_SHA" \
+              --title "RocksDict $TARGET_VERSION — Python 3.14t (Windows/Linux x64)" \
+              --notes-file release-notes.md
+          fi
+          gh release edit "$tag" --draft=false
+          gh release view "$tag" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

@@ -1,19 +1,6 @@
 name: CPython 3.14t wheels (Windows and Linux x64)
 
 on:
-  push:
-    branches: [main, ci/python-314t-x64-wheels]
-    paths:
-      - .github/workflows/python-314t-wheels.yml
-      - Cargo.toml
-      - Cargo.lock
-      - pyproject.toml
-      - src/**
-      - python/**
-      - rust-rocksdb
-      - test/**
-      - tools/check_python_314t_wheel.py
-      - tools/normalize_rocksdb_mtime.py
   pull_request:
     branches: [main]
     paths:
