@@ -9,9 +9,10 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 use rocksdb::wide_columns::{Iterable as _, WideColumns};
-use rocksdb::{AsColumnFamilyRef, UnboundColumnFamily};
+use rocksdb::AsColumnFamilyRef;
+use crate::compat::{ColumnFamilyHandle, RawDbPtr};
 use std::ptr::null_mut;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 #[pyclass]
 #[allow(dead_code)]
@@ -65,7 +66,7 @@ pub(crate) struct RdictEntities {
 impl RdictIter {
     pub(crate) fn new(
         db: &DbReferenceHolder,
-        cf: &Option<Arc<UnboundColumnFamily>>,
+        cf: &Option<ColumnFamilyHandle>,
         readopts: ReadOptionsPy,
         pickle_loads: &Py<PyAny>,
         raw_mode: bool,

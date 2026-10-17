@@ -27,6 +27,7 @@ rocksdb = { package = "rust-rocksdb", version = "=0.53.0", default-features = fa
     "zlib",
     "bzip2",
     "raw-ptr",
+    "multi-threaded-cf",
 ] }
 librocksdb-sys = { package = "rust-librocksdb-sys", version = "=0.48.1", default-features = false }
 serde = { version = "1", features = ["derive"] }

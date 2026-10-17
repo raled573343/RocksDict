@@ -1,4 +1,5 @@
 use crate::db_reference::{DbReference, DbReferenceHolder};
+use crate::compat::ColumnFamilyHandle;
 use crate::encoder::{decode_value, encode_key, encode_value};
 use crate::exceptions::DbClosedError;
 use crate::iter::{RdictItems, RdictKeys, RdictValues};
@@ -11,8 +12,8 @@ use pyo3::exceptions::{PyException, PyKeyError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use rocksdb::{
-    wide_columns::Iterable as _, ColumnFamilyDescriptor, FlushOptions, LiveFile, ReadOptions,
-    UnboundColumnFamily, WriteOptions, DEFAULT_COLUMN_FAMILY_NAME,
+    ColumnFamilyDescriptor, FlushOptions, LiveFile, ReadOptions,
+    WriteOptions, DEFAULT_COLUMN_FAMILY_NAME,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -74,7 +75,7 @@ pub(crate) struct Rdict {
     pub(crate) dumps: Py<PyAny>,
     pub(crate) write_opt_py: WriteOptionsPy,
     pub(crate) read_opt_py: ReadOptionsPy,
-    pub(crate) column_family: Option<Arc<UnboundColumnFamily>>,
+    pub(crate) column_family: Option<ColumnFamilyHandle>,
     pub(crate) opt_py: OptionsPy,
     pub(crate) access_type: AccessType,
     pub(crate) slice_transforms: Arc<RwLock<HashMap<String, SliceTransformType>>>,
@@ -966,7 +967,7 @@ impl Rdict {
     ///     the column family Rdict of this name
     pub fn get_column_family(&self, name: &str, py: Python) -> PyResult<Self> {
         let db = self.get_db()?;
-        match unsafe { db.cf_handle_unbounded(name) } {
+        match ColumnFamilyHandle::new(db.clone(), name) {
             None => Err(PyException::new_err(format!(
                 "column name `{name}` does not exist, use `create_cf` to creat it",
             ))),
@@ -1006,7 +1007,7 @@ impl Rdict {
     ///         db.write(wb)
     pub fn get_column_family_handle(&self, name: &str) -> PyResult<ColumnFamilyPy> {
         let db = self.get_db()?;
-        match unsafe { db.cf_handle_unbounded(name) } {
+        match ColumnFamilyHandle::new(db.clone(), name) {
             None => Err(PyException::new_err(format!(
                 "column name `{name}` does not exist, use `create_cf` to creat it",
             ))),
@@ -1380,7 +1381,7 @@ impl Rdict {
         key_list: &Bound<PyList>,
         default: Option<Bound<'py, PyAny>>,
         py: Python<'py>,
-        cf: &Arc<UnboundColumnFamily>,
+        cf: &ColumnFamilyHandle,
     ) -> PyResult<Bound<'py, PyList>> {
         let keys_py = key_list.iter().collect::<Vec<_>>();
         let mut keys: Vec<Cow<[u8]>> = Vec::with_capacity(key_list.len());
@@ -1439,7 +1440,7 @@ unsafe impl Send for Rdict {}
 #[derive(Clone)]
 pub(crate) struct ColumnFamilyPy {
     // must follow this drop order
-    pub(crate) cf: Arc<UnboundColumnFamily>,
+    pub(crate) cf: ColumnFamilyHandle,
     // must keep db alive
     db: DbReferenceHolder,
 }

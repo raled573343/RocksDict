@@ -5,6 +5,7 @@ use crate::{
     Rdict, RocksDictConfig,
 };
 use pyo3::{exceptions::PyException, prelude::*};
+use crate::compat::RawDbPtr;
 
 /// Database's checkpoint object.
 /// Used to create checkpoints of the specified DB from time to time.

@@ -6,6 +6,7 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::PyResult;
 use rocksdb::Options;
+use crate::compat::RawOptionsPtr;
 use std::ffi::CString;
 
 /// SstFileWriter is used to create sst files that can be added to database later

@@ -1,3 +1,4 @@
+mod compat;
 mod checkpoints;
 mod db_reference;
 mod encoder;

@@ -4,8 +4,8 @@ use crate::exceptions::DbClosedError;
 use crate::{Rdict, RdictItems, RdictIter, RdictKeys, RdictValues, ReadOptionsPy};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use rocksdb::{ReadOptions, UnboundColumnFamily};
-use std::sync::Arc;
+use rocksdb::ReadOptions;
+use crate::compat::{ColumnFamilyHandle, RawDbPtr};
 
 /// A consistent view of the database at the point of creation.
 ///
@@ -39,7 +39,7 @@ use std::sync::Arc;
 #[pyclass]
 pub struct Snapshot {
     pub(crate) inner: *const librocksdb_sys::rocksdb_snapshot_t,
-    pub(crate) column_family: Option<Arc<UnboundColumnFamily>>,
+    pub(crate) column_family: Option<ColumnFamilyHandle>,
     pub(crate) pickle_loads: Py<PyAny>,
     pub(crate) read_opt: ReadOptions,
     // decrease db Rc last
