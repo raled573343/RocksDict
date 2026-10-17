@@ -1,0 +1,1167 @@
+// Copyright 2021 Yiyuan Liu
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+use std::marker::PhantomData;
+
+use crate::{
+    AsColumnFamilyRef, DBIteratorWithThreadMode, DBPinnableSlice, DBRawIteratorWithThreadMode,
+    Direction, Error, IteratorMode, ReadOptions, SnapshotWithThreadMode, WriteBatchWithIndex,
+    WriteBatchWithTransaction,
+    db::{DBAccess, convert_values},
+    ffi,
+};
+use libc::{c_char, c_void, size_t};
+
+// Default options are kept per-thread to avoid re-allocating on every call while
+// also preventing cross-thread sharing. Some RocksDB option wrappers hold
+// pointers into internal buffers and are not safe to share across threads.
+// Using thread_local allows cheap reuse in the common "default options" path
+// without synchronization overhead. Callers who need non-defaults must pass
+// explicit options.
+thread_local! { static DEFAULT_READ_OPTS: ReadOptions = ReadOptions::default(); }
+
+/// RocksDB Transaction.
+///
+/// To use transactions, you must first create a [`TransactionDB`] or [`OptimisticTransactionDB`].
+///
+/// [`TransactionDB`]: crate::TransactionDB
+/// [`OptimisticTransactionDB`]: crate::OptimisticTransactionDB
+///
+/// A `Transaction` must not outlive the `TransactionDB` it was created from:
+///
+/// ```compile_fail,E0597
+/// use rust_rocksdb::{SingleThreaded, TransactionDB};
+///
+/// let _txn = {
+///     let db = TransactionDB::<SingleThreaded>::open_default("foo").unwrap();
+///     db.transaction()
+/// };
+/// ```
+///
+/// A `Snapshot` taken from a `Transaction` must not outlive the `Transaction`:
+///
+/// ```compile_fail,E0597
+/// use rust_rocksdb::{SingleThreaded, TransactionDB};
+///
+/// let db = TransactionDB::<SingleThreaded>::open_default("foo").unwrap();
+/// let _snapshot = {
+///     let txn = db.transaction();
+///     txn.snapshot()
+/// };
+/// ```
+pub struct Transaction<'db, DB> {
+    pub(crate) inner: *mut ffi::rocksdb_transaction_t,
+    pub(crate) _marker: PhantomData<&'db DB>,
+}
+
+unsafe impl<DB> Send for Transaction<'_, DB> {}
+
+impl<DB> DBAccess for Transaction<'_, DB> {
+    unsafe fn create_snapshot(&self) -> *const ffi::rocksdb_snapshot_t {
+        unsafe { ffi::rocksdb_transaction_get_snapshot(self.inner) }
+    }
+
+    unsafe fn release_snapshot(&self, snapshot: *const ffi::rocksdb_snapshot_t) {
+        unsafe {
+            ffi::rocksdb_free(snapshot as *mut c_void);
+        }
+    }
+
+    unsafe fn create_iterator(&self, readopts: &ReadOptions) -> *mut ffi::rocksdb_iterator_t {
+        unsafe { ffi::rocksdb_transaction_create_iterator(self.inner, readopts.inner) }
+    }
+
+    unsafe fn create_iterator_cf(
+        &self,
+        cf_handle: *mut ffi::rocksdb_column_family_handle_t,
+        readopts: &ReadOptions,
+    ) -> *mut ffi::rocksdb_iterator_t {
+        unsafe {
+            ffi::rocksdb_transaction_create_iterator_cf(self.inner, readopts.inner, cf_handle)
+        }
+    }
+
+    fn get_opt<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        readopts: &ReadOptions,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.get_opt(key, readopts)
+    }
+
+    fn get_cf_opt<K: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        readopts: &ReadOptions,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.get_cf_opt(cf, key, readopts)
+    }
+
+    fn get_pinned_opt<K: AsRef<[u8]>>(
+        &'_ self,
+        key: K,
+        readopts: &ReadOptions,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        self.get_pinned_opt(key, readopts)
+    }
+
+    fn get_pinned_cf_opt<K: AsRef<[u8]>>(
+        &'_ self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        readopts: &ReadOptions,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        self.get_pinned_cf_opt(cf, key, readopts)
+    }
+
+    fn multi_get_opt<K, I>(
+        &self,
+        keys: I,
+        readopts: &ReadOptions,
+    ) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        self.multi_get_opt(keys, readopts)
+    }
+
+    fn multi_get_cf_opt<'b, K, I, W>(
+        &self,
+        keys_cf: I,
+        readopts: &ReadOptions,
+    ) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = (&'b W, K)>,
+        W: AsColumnFamilyRef + 'b,
+    {
+        self.multi_get_cf_opt(keys_cf, readopts)
+    }
+}
+
+impl<DB> Transaction<'_, DB> {
+    /// Write all batched keys to the DB atomically.
+    ///
+    /// May return any error that could be returned by `DB::write`.
+    ///
+    /// If this transaction was created by a [`TransactionDB`], an error of
+    /// the [`Expired`] kind may be returned if this transaction has
+    /// lived longer than expiration time in [`TransactionOptions`].
+    ///
+    /// If this transaction was created by an [`OptimisticTransactionDB`], an error of
+    /// the [`Busy`] kind may be returned if the transaction
+    /// could not guarantee that there are no write conflicts.
+    /// An error of the [`TryAgain`] kind may be returned if the memtable
+    /// history size is not large enough (see [`Options::set_max_write_buffer_size_to_maintain`]).
+    ///
+    /// [`Expired`]: crate::ErrorKind::Expired
+    /// [`TransactionOptions`]: crate::TransactionOptions
+    /// [`TransactionDB`]: crate::TransactionDB
+    /// [`OptimisticTransactionDB`]: crate::OptimisticTransactionDB
+    /// [`Busy`]: crate::ErrorKind::Busy
+    /// [`TryAgain`]: crate::ErrorKind::TryAgain
+    /// [`Options::set_max_write_buffer_size_to_maintain`]: crate::Options::set_max_write_buffer_size_to_maintain
+    pub fn commit(self) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_commit(self.inner));
+        }
+        Ok(())
+    }
+
+    pub fn set_name(&self, name: &[u8]) -> Result<(), Error> {
+        let ptr = name.as_ptr();
+        let len = name.len();
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_set_name(
+                self.inner, ptr as _, len as _
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn get_name(&self) -> Option<Vec<u8>> {
+        unsafe {
+            let mut name_len = 0;
+            let name = ffi::rocksdb_transaction_get_name(self.inner, &raw mut name_len);
+            if name.is_null() {
+                None
+            } else {
+                let mut vec = vec![0; name_len];
+                std::ptr::copy_nonoverlapping(name.cast::<u8>(), vec.as_mut_ptr(), name_len);
+                ffi::rocksdb_free(name as *mut c_void);
+                Some(vec)
+            }
+        }
+    }
+
+    pub fn prepare(&self) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_prepare(self.inner));
+        }
+        Ok(())
+    }
+
+    /// Returns snapshot associated with transaction if snapshot was enabled in [`TransactionOptions`].
+    /// Otherwise, returns a snapshot with `nullptr` inside which doesn't affect read operations.
+    ///
+    /// [`TransactionOptions`]: crate::TransactionOptions
+    pub fn snapshot(&'_ self) -> SnapshotWithThreadMode<'_, Self> {
+        SnapshotWithThreadMode::new(self)
+    }
+
+    /// Discard all batched writes in this transaction.
+    pub fn rollback(&self) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_rollback(self.inner));
+            Ok(())
+        }
+    }
+
+    /// Record the state of the transaction for future calls to [`rollback_to_savepoint`].
+    /// May be called multiple times to set multiple save points.
+    ///
+    /// [`rollback_to_savepoint`]: Self::rollback_to_savepoint
+    pub fn set_savepoint(&self) {
+        unsafe {
+            ffi::rocksdb_transaction_set_savepoint(self.inner);
+        }
+    }
+
+    /// Undo all operations in this transaction since the most recent call to [`set_savepoint`]
+    /// and removes the most recent [`set_savepoint`].
+    ///
+    /// Returns error if there is no previous call to [`set_savepoint`].
+    ///
+    /// [`set_savepoint`]: Self::set_savepoint
+    pub fn rollback_to_savepoint(&self) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_rollback_to_savepoint(self.inner));
+            Ok(())
+        }
+    }
+
+    /// Get the bytes associated with a key value.
+    ///
+    /// See [`get_cf_opt`] for details.
+    ///
+    /// [`get_cf_opt`]: Self::get_cf_opt
+    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Error> {
+        DEFAULT_READ_OPTS.with(|opts| self.get_opt(key, opts))
+    }
+
+    pub fn get_pinned<K: AsRef<[u8]>>(
+        &'_ self,
+        key: K,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        DEFAULT_READ_OPTS.with(|opts| self.get_pinned_opt(key, opts))
+    }
+
+    /// Get the bytes associated with a key value and the given column family.
+    ///
+    /// See [`get_cf_opt`] for details.
+    ///
+    /// [`get_cf_opt`]: Self::get_cf_opt
+    pub fn get_cf<K: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        DEFAULT_READ_OPTS.with(|opts| self.get_cf_opt(cf, key, opts))
+    }
+
+    pub fn get_pinned_cf<K: AsRef<[u8]>>(
+        &'_ self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        DEFAULT_READ_OPTS.with(|opts| self.get_pinned_cf_opt(cf, key, opts))
+    }
+
+    /// Get the key and ensure that this transaction will only
+    /// be able to be committed if this key is not written outside this
+    /// transaction after it has first been read (or after the snapshot if a
+    /// snapshot is set in this transaction).
+    ///
+    /// See [`get_for_update_cf_opt`] for details.
+    ///
+    /// [`get_for_update_cf_opt`]: Self::get_for_update_cf_opt
+    pub fn get_for_update<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        exclusive: bool,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        DEFAULT_READ_OPTS.with(|opts| self.get_for_update_opt(key, exclusive, opts))
+    }
+
+    pub fn get_pinned_for_update<K: AsRef<[u8]>>(
+        &'_ self,
+        key: K,
+        exclusive: bool,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        DEFAULT_READ_OPTS.with(|opts| self.get_pinned_for_update_opt(key, exclusive, opts))
+    }
+
+    /// Get the key in the given column family and ensure that this transaction will only
+    /// be able to be committed if this key is not written outside this
+    /// transaction after it has first been read (or after the snapshot if a
+    /// snapshot is set in this transaction).
+    ///
+    /// See [`get_for_update_cf_opt`] for details.
+    ///
+    /// [`get_for_update_cf_opt`]: Self::get_for_update_cf_opt
+    pub fn get_for_update_cf<K: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        exclusive: bool,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        DEFAULT_READ_OPTS.with(|opts| self.get_for_update_cf_opt(cf, key, exclusive, opts))
+    }
+
+    pub fn get_pinned_for_update_cf<K: AsRef<[u8]>>(
+        &'_ self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        exclusive: bool,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        DEFAULT_READ_OPTS.with(|opts| self.get_pinned_for_update_cf_opt(cf, key, exclusive, opts))
+    }
+
+    /// Returns the bytes associated with a key value with read options.
+    ///
+    /// See [`get_cf_opt`] for details.
+    ///
+    /// [`get_cf_opt`]: Self::get_cf_opt
+    pub fn get_opt<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        readopts: &ReadOptions,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.get_pinned_opt(key, readopts)
+            .map(|x| x.map(|v| v.as_ref().to_vec()))
+    }
+
+    pub fn get_pinned_opt<K: AsRef<[u8]>>(
+        &'_ self,
+        key: K,
+        readopts: &ReadOptions,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        let key = key.as_ref();
+        unsafe {
+            let val = ffi_try!(ffi::rocksdb_transaction_get_pinned(
+                self.inner,
+                readopts.inner,
+                key.as_ptr() as *const c_char,
+                key.len(),
+            ));
+            if val.is_null() {
+                Ok(None)
+            } else {
+                Ok(Some(DBPinnableSlice::from_c(val)))
+            }
+        }
+    }
+
+    /// Get the bytes associated with a key value and the given column family with read options.
+    ///
+    /// This function will also read pending changes in this transaction.
+    /// Currently, this function will return an error of the [`MergeInProgress`] kind
+    /// if the most recent write to the queried key in this batch is a Merge.
+    ///
+    /// [`MergeInProgress`]: crate::ErrorKind::MergeInProgress
+    pub fn get_cf_opt<K: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        readopts: &ReadOptions,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.get_pinned_cf_opt(cf, key, readopts)
+            .map(|x| x.map(|v| v.as_ref().to_vec()))
+    }
+
+    pub fn get_pinned_cf_opt<K: AsRef<[u8]>>(
+        &'_ self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        readopts: &ReadOptions,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        let key = key.as_ref();
+        unsafe {
+            let val = ffi_try!(ffi::rocksdb_transaction_get_pinned_cf(
+                self.inner,
+                readopts.inner,
+                cf.inner(),
+                key.as_ptr() as *const c_char,
+                key.len(),
+            ));
+            if val.is_null() {
+                Ok(None)
+            } else {
+                Ok(Some(DBPinnableSlice::from_c(val)))
+            }
+        }
+    }
+
+    /// Get the key with read options and ensure that this transaction will only
+    /// be able to be committed if this key is not written outside this
+    /// transaction after it has first been read (or after the snapshot if a
+    /// snapshot is set in this transaction).
+    ///
+    /// See [`get_for_update_cf_opt`] for details.
+    ///
+    /// [`get_for_update_cf_opt`]: Self::get_for_update_cf_opt
+    pub fn get_for_update_opt<K: AsRef<[u8]>>(
+        &self,
+        key: K,
+        exclusive: bool,
+        opts: &ReadOptions,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.get_pinned_for_update_opt(key, exclusive, opts)
+            .map(|x| x.map(|v| v.as_ref().to_vec()))
+    }
+
+    pub fn get_pinned_for_update_opt<K: AsRef<[u8]>>(
+        &'_ self,
+        key: K,
+        exclusive: bool,
+        opts: &ReadOptions,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        let key = key.as_ref();
+        unsafe {
+            let val = ffi_try!(ffi::rocksdb_transaction_get_pinned_for_update(
+                self.inner,
+                opts.inner,
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                u8::from(exclusive),
+            ));
+            if val.is_null() {
+                Ok(None)
+            } else {
+                Ok(Some(DBPinnableSlice::from_c(val)))
+            }
+        }
+    }
+
+    /// Get the key in the given column family with read options
+    /// and ensure that this transaction will only
+    /// be able to be committed if this key is not written outside this
+    /// transaction after it has first been read (or after the snapshot if a
+    /// snapshot is set in this transaction).
+    ///
+    /// Currently, this function will return an error of the [`MergeInProgress`]
+    /// if the most recent write to the queried key in this batch is a Merge.
+    ///
+    /// If this transaction was created by a [`TransactionDB`], it can return error of kind:
+    /// * [`Busy`] if there is a write conflict.
+    /// * [`TimedOut`] if a lock could not be acquired.
+    /// * [`TryAgain`] if the memtable history size is not large enough.
+    /// * [`MergeInProgress`] if merge operations cannot be resolved.
+    /// * or other errors if this key could not be read.
+    ///
+    /// If this transaction was created by an `[OptimisticTransactionDB]`, `get_for_update_opt`
+    /// can cause [`commit`] to fail. Otherwise, it could return any error that could
+    /// be returned by `[DB::get]`.
+    ///
+    /// [`Busy`]: crate::ErrorKind::Busy
+    /// [`TimedOut`]: crate::ErrorKind::TimedOut
+    /// [`TryAgain`]: crate::ErrorKind::TryAgain
+    /// [`MergeInProgress`]: crate::ErrorKind::MergeInProgress
+    /// [`TransactionDB`]: crate::TransactionDB
+    /// [`OptimisticTransactionDB`]: crate::OptimisticTransactionDB
+    /// [`commit`]: Self::commit
+    /// [`DB::get`]: crate::DB::get
+    pub fn get_for_update_cf_opt<K: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        exclusive: bool,
+        opts: &ReadOptions,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        self.get_pinned_for_update_cf_opt(cf, key, exclusive, opts)
+            .map(|x| x.map(|v| v.as_ref().to_vec()))
+    }
+
+    pub fn get_pinned_for_update_cf_opt<K: AsRef<[u8]>>(
+        &'_ self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        exclusive: bool,
+        opts: &ReadOptions,
+    ) -> Result<Option<DBPinnableSlice<'_>>, Error> {
+        let key = key.as_ref();
+        unsafe {
+            let val = ffi_try!(ffi::rocksdb_transaction_get_pinned_for_update_cf(
+                self.inner,
+                opts.inner,
+                cf.inner(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                u8::from(exclusive),
+            ));
+            if val.is_null() {
+                Ok(None)
+            } else {
+                Ok(Some(DBPinnableSlice::from_c(val)))
+            }
+        }
+    }
+
+    /// Return the values associated with the given keys.
+    pub fn multi_get<K, I>(&self, keys: I) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        DEFAULT_READ_OPTS.with(|opts| self.multi_get_opt(keys, opts))
+    }
+
+    /// Return the values associated with the given keys using read options.
+    pub fn multi_get_opt<K, I>(
+        &self,
+        keys: I,
+        readopts: &ReadOptions,
+    ) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        let owned_keys: Vec<K> = keys.into_iter().collect();
+        let (ptr_keys, keys_sizes): (Vec<*const c_char>, Vec<usize>) = owned_keys
+            .iter()
+            .map(|k| {
+                let key = k.as_ref();
+                (key.as_ptr() as *const c_char, key.len())
+            })
+            .unzip();
+
+        let mut values: Vec<*mut c_char> = Vec::with_capacity(ptr_keys.len());
+        let mut values_sizes: Vec<usize> = Vec::with_capacity(ptr_keys.len());
+        let mut errors: Vec<*mut c_char> = Vec::with_capacity(ptr_keys.len());
+        unsafe {
+            ffi::rocksdb_transaction_multi_get(
+                self.inner,
+                readopts.inner,
+                ptr_keys.len(),
+                ptr_keys.as_ptr(),
+                keys_sizes.as_ptr(),
+                values.as_mut_ptr(),
+                values_sizes.as_mut_ptr(),
+                errors.as_mut_ptr(),
+            );
+        }
+
+        unsafe {
+            values.set_len(ptr_keys.len());
+            values_sizes.set_len(ptr_keys.len());
+            errors.set_len(ptr_keys.len());
+        }
+
+        convert_values(values, values_sizes, errors)
+    }
+
+    /// Return the values associated with the given keys and column families.
+    pub fn multi_get_cf<'a, 'b: 'a, K, I, W>(
+        &'a self,
+        keys: I,
+    ) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = (&'b W, K)>,
+        W: 'b + AsColumnFamilyRef,
+    {
+        DEFAULT_READ_OPTS.with(|opts| self.multi_get_cf_opt(keys, opts))
+    }
+
+    /// Return the values associated with the given keys and column families using read options.
+    pub fn multi_get_cf_opt<'a, 'b: 'a, K, I, W>(
+        &'a self,
+        keys: I,
+        readopts: &ReadOptions,
+    ) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = (&'b W, K)>,
+        W: 'b + AsColumnFamilyRef,
+    {
+        let cfs_and_owned_keys: Vec<(&'b W, K)> = keys.into_iter().collect();
+        let (ptr_keys, keys_sizes): (Vec<*const c_char>, Vec<usize>) = cfs_and_owned_keys
+            .iter()
+            .map(|(_, k)| {
+                let key = k.as_ref();
+                (key.as_ptr() as *const c_char, key.len())
+            })
+            .unzip();
+        let ptr_cfs: Vec<*const ffi::rocksdb_column_family_handle_t> = cfs_and_owned_keys
+            .iter()
+            .map(|(c, _)| c.inner().cast_const())
+            .collect();
+        let mut values: Vec<*mut c_char> = Vec::with_capacity(ptr_keys.len());
+        let mut values_sizes: Vec<usize> = Vec::with_capacity(ptr_keys.len());
+        let mut errors: Vec<*mut c_char> = Vec::with_capacity(ptr_keys.len());
+        unsafe {
+            ffi::rocksdb_transaction_multi_get_cf(
+                self.inner,
+                readopts.inner,
+                ptr_cfs.as_ptr(),
+                ptr_keys.len(),
+                ptr_keys.as_ptr(),
+                keys_sizes.as_ptr(),
+                values.as_mut_ptr(),
+                values_sizes.as_mut_ptr(),
+                errors.as_mut_ptr(),
+            );
+        }
+
+        unsafe {
+            values.set_len(ptr_keys.len());
+            values_sizes.set_len(ptr_keys.len());
+            errors.set_len(ptr_keys.len());
+        }
+
+        convert_values(values, values_sizes, errors)
+    }
+
+    /// Return the values associated with the given keys, marking every key read for update.
+    ///
+    /// See [`multi_get_for_update_cf_opt`] for details.
+    ///
+    /// [`multi_get_for_update_cf_opt`]: Self::multi_get_for_update_cf_opt
+    pub fn multi_get_for_update<K, I>(&self, keys: I) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        DEFAULT_READ_OPTS.with(|opts| self.multi_get_for_update_opt(keys, opts))
+    }
+
+    /// Return the values associated with the given keys using read options, marking every key
+    /// read for update.
+    ///
+    /// See [`multi_get_for_update_cf_opt`] for details.
+    ///
+    /// [`multi_get_for_update_cf_opt`]: Self::multi_get_for_update_cf_opt
+    pub fn multi_get_for_update_opt<K, I>(
+        &self,
+        keys: I,
+        readopts: &ReadOptions,
+    ) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = K>,
+    {
+        let owned_keys: Vec<K> = keys.into_iter().collect();
+        let (ptr_keys, keys_sizes): (Vec<*const c_char>, Vec<usize>) = owned_keys
+            .iter()
+            .map(|k| {
+                let key = k.as_ref();
+                (key.as_ptr() as *const c_char, key.len())
+            })
+            .unzip();
+
+        let mut values: Vec<*mut c_char> = Vec::with_capacity(ptr_keys.len());
+        let mut values_sizes: Vec<usize> = Vec::with_capacity(ptr_keys.len());
+        let mut errors: Vec<*mut c_char> = Vec::with_capacity(ptr_keys.len());
+        unsafe {
+            ffi::rocksdb_transaction_multi_get_for_update(
+                self.inner,
+                readopts.inner,
+                ptr_keys.len(),
+                ptr_keys.as_ptr(),
+                keys_sizes.as_ptr(),
+                values.as_mut_ptr(),
+                values_sizes.as_mut_ptr(),
+                errors.as_mut_ptr(),
+            );
+        }
+
+        unsafe {
+            values.set_len(ptr_keys.len());
+            values_sizes.set_len(ptr_keys.len());
+            errors.set_len(ptr_keys.len());
+        }
+
+        convert_values(values, values_sizes, errors)
+    }
+
+    /// Return the values associated with the given keys and column families, marking every key
+    /// read for update.
+    ///
+    /// See [`multi_get_for_update_cf_opt`] for details.
+    ///
+    /// [`multi_get_for_update_cf_opt`]: Self::multi_get_for_update_cf_opt
+    pub fn multi_get_for_update_cf<'a, 'b: 'a, K, I, W>(
+        &'a self,
+        keys: I,
+    ) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = (&'b W, K)>,
+        W: 'b + AsColumnFamilyRef,
+    {
+        DEFAULT_READ_OPTS.with(|opts| self.multi_get_for_update_cf_opt(keys, opts))
+    }
+
+    /// Return the values associated with the given keys and column families using read options,
+    /// marking every key read for update.
+    ///
+    /// This is [`get_for_update_cf_opt`] over a batch of keys: each key is fetched and
+    /// conflict checked, so the transaction only commits if none of them were written
+    /// outside it after the read (or after the snapshot, if one is set). There is no
+    /// `exclusive` parameter because RocksDB always takes the lock exclusively here.
+    ///
+    /// Locking is all or nothing. RocksDB locks every key before reading any of them,
+    /// and if one lock fails it returns that same error for every entry without
+    /// performing the reads. Once the locks are held, each key is read on its own, so
+    /// after that point the results can differ per key.
+    ///
+    /// [`get_for_update_cf_opt`]: Self::get_for_update_cf_opt
+    pub fn multi_get_for_update_cf_opt<'a, 'b: 'a, K, I, W>(
+        &'a self,
+        keys: I,
+        readopts: &ReadOptions,
+    ) -> Vec<Result<Option<Vec<u8>>, Error>>
+    where
+        K: AsRef<[u8]>,
+        I: IntoIterator<Item = (&'b W, K)>,
+        W: 'b + AsColumnFamilyRef,
+    {
+        let cfs_and_owned_keys: Vec<(&'b W, K)> = keys.into_iter().collect();
+        let (ptr_keys, keys_sizes): (Vec<*const c_char>, Vec<usize>) = cfs_and_owned_keys
+            .iter()
+            .map(|(_, k)| {
+                let key = k.as_ref();
+                (key.as_ptr() as *const c_char, key.len())
+            })
+            .unzip();
+        let ptr_cfs: Vec<*const ffi::rocksdb_column_family_handle_t> = cfs_and_owned_keys
+            .iter()
+            .map(|(c, _)| c.inner().cast_const())
+            .collect();
+        let mut values: Vec<*mut c_char> = Vec::with_capacity(ptr_keys.len());
+        let mut values_sizes: Vec<usize> = Vec::with_capacity(ptr_keys.len());
+        let mut errors: Vec<*mut c_char> = Vec::with_capacity(ptr_keys.len());
+        unsafe {
+            ffi::rocksdb_transaction_multi_get_for_update_cf(
+                self.inner,
+                readopts.inner,
+                ptr_cfs.as_ptr(),
+                ptr_keys.len(),
+                ptr_keys.as_ptr(),
+                keys_sizes.as_ptr(),
+                values.as_mut_ptr(),
+                values_sizes.as_mut_ptr(),
+                errors.as_mut_ptr(),
+            );
+        }
+
+        unsafe {
+            values.set_len(ptr_keys.len());
+            values_sizes.set_len(ptr_keys.len());
+            errors.set_len(ptr_keys.len());
+        }
+
+        convert_values(values, values_sizes, errors)
+    }
+
+    /// Put the key value in default column family and do conflict checking on the key.
+    ///
+    /// See [`put_cf`] for details.
+    ///
+    /// [`put_cf`]: Self::put_cf
+    pub fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Error> {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_put(
+                self.inner,
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                value.as_ptr() as *const c_char,
+                value.len() as size_t,
+            ));
+            Ok(())
+        }
+    }
+
+    /// Put the key value in the given column family and do conflict checking on the key.
+    ///
+    /// If this transaction was created by a [`TransactionDB`], it can return error of kind:
+    /// * [`Busy`] if there is a write conflict.
+    /// * [`TimedOut`] if a lock could not be acquired.
+    /// * [`TryAgain`] if the memtable history size is not large enough.
+    /// * [`MergeInProgress`] if merge operations cannot be resolved.
+    /// * or other errors on unexpected failures.
+    ///
+    /// [`Busy`]: crate::ErrorKind::Busy
+    /// [`TimedOut`]: crate::ErrorKind::TimedOut
+    /// [`TryAgain`]: crate::ErrorKind::TryAgain
+    /// [`MergeInProgress`]: crate::ErrorKind::MergeInProgress
+    /// [`TransactionDB`]: crate::TransactionDB
+    /// [`OptimisticTransactionDB`]: crate::OptimisticTransactionDB
+    pub fn put_cf<K: AsRef<[u8]>, V: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        value: V,
+    ) -> Result<(), Error> {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_put_cf(
+                self.inner,
+                cf.inner(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                value.as_ptr() as *const c_char,
+                value.len() as size_t,
+            ));
+            Ok(())
+        }
+    }
+
+    /// Merge value with existing value of key, and also do conflict checking on the key.
+    ///
+    /// See [`merge_cf`] for details.
+    ///
+    /// [`merge_cf`]: Self::merge_cf
+    pub fn merge<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Error> {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_merge(
+                self.inner,
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                value.as_ptr() as *const c_char,
+                value.len() as size_t
+            ));
+            Ok(())
+        }
+    }
+
+    /// Merge `value` with existing value of `key` in the given column family,
+    /// and also do conflict checking on the key.
+    ///
+    /// If this transaction was created by a [`TransactionDB`], it can return error of kind:
+    /// * [`Busy`] if there is a write conflict.
+    /// * [`TimedOut`] if a lock could not be acquired.
+    /// * [`TryAgain`] if the memtable history size is not large enough.
+    /// * [`MergeInProgress`] if merge operations cannot be resolved.
+    /// * or other errors on unexpected failures.
+    ///
+    /// [`Busy`]: crate::ErrorKind::Busy
+    /// [`TimedOut`]: crate::ErrorKind::TimedOut
+    /// [`TryAgain`]: crate::ErrorKind::TryAgain
+    /// [`MergeInProgress`]: crate::ErrorKind::MergeInProgress
+    /// [`TransactionDB`]: crate::TransactionDB
+    pub fn merge_cf<K: AsRef<[u8]>, V: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+        value: V,
+    ) -> Result<(), Error> {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_merge_cf(
+                self.inner,
+                cf.inner(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t,
+                value.as_ptr() as *const c_char,
+                value.len() as size_t
+            ));
+            Ok(())
+        }
+    }
+
+    /// Delete the key value if it exists and do conflict checking on the key.
+    ///
+    /// See [`delete_cf`] for details.
+    ///
+    /// [`delete_cf`]: Self::delete_cf
+    pub fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Error> {
+        let key = key.as_ref();
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_delete(
+                self.inner,
+                key.as_ptr() as *const c_char,
+                key.len() as size_t
+            ));
+        }
+        Ok(())
+    }
+
+    /// Delete the key value in the given column family and do conflict checking.
+    ///
+    /// If this transaction was created by a [`TransactionDB`], it can return error of kind:
+    /// * [`Busy`] if there is a write conflict.
+    /// * [`TimedOut`] if a lock could not be acquired.
+    /// * [`TryAgain`] if the memtable history size is not large enough.
+    /// * [`MergeInProgress`] if merge operations cannot be resolved.
+    /// * or other errors on unexpected failures.
+    ///
+    /// [`Busy`]: crate::ErrorKind::Busy
+    /// [`TimedOut`]: crate::ErrorKind::TimedOut
+    /// [`TryAgain`]: crate::ErrorKind::TryAgain
+    /// [`MergeInProgress`]: crate::ErrorKind::MergeInProgress
+    /// [`TransactionDB`]: crate::TransactionDB
+    pub fn delete_cf<K: AsRef<[u8]>>(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+        key: K,
+    ) -> Result<(), Error> {
+        let key = key.as_ref();
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_delete_cf(
+                self.inner,
+                cf.inner(),
+                key.as_ptr() as *const c_char,
+                key.len() as size_t
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn iterator<'a: 'b, 'b>(
+        &'a self,
+        mode: IteratorMode,
+    ) -> DBIteratorWithThreadMode<'b, Self> {
+        let readopts = ReadOptions::default();
+        self.iterator_opt(mode, readopts)
+    }
+
+    pub fn iterator_opt<'a: 'b, 'b>(
+        &'a self,
+        mode: IteratorMode,
+        readopts: ReadOptions,
+    ) -> DBIteratorWithThreadMode<'b, Self> {
+        DBIteratorWithThreadMode::new(self, readopts, mode)
+    }
+
+    /// Opens an iterator using the provided ReadOptions.
+    /// This is used when you want to iterate over a specific ColumnFamily with a modified ReadOptions.
+    pub fn iterator_cf_opt<'a: 'b, 'b>(
+        &'a self,
+        cf_handle: &impl AsColumnFamilyRef,
+        readopts: ReadOptions,
+        mode: IteratorMode,
+    ) -> DBIteratorWithThreadMode<'b, Self> {
+        DBIteratorWithThreadMode::new_cf(self, cf_handle.inner(), readopts, mode)
+    }
+
+    /// Opens an iterator with `set_total_order_seek` enabled.
+    /// This must be used to iterate across prefixes when `set_memtable_factory` has been called
+    /// with a Hash-based implementation.
+    pub fn full_iterator<'a: 'b, 'b>(
+        &'a self,
+        mode: IteratorMode,
+    ) -> DBIteratorWithThreadMode<'b, Self> {
+        let mut opts = ReadOptions::default();
+        opts.set_total_order_seek(true);
+        DBIteratorWithThreadMode::new(self, opts, mode)
+    }
+
+    pub fn prefix_iterator<'a: 'b, 'b, P: AsRef<[u8]>>(
+        &'a self,
+        prefix: P,
+    ) -> DBIteratorWithThreadMode<'b, Self> {
+        let mut opts = ReadOptions::default();
+        opts.set_prefix_same_as_start(true);
+        DBIteratorWithThreadMode::new(
+            self,
+            opts,
+            IteratorMode::From(prefix.as_ref(), Direction::Forward),
+        )
+    }
+
+    pub fn iterator_cf<'a: 'b, 'b>(
+        &'a self,
+        cf_handle: &impl AsColumnFamilyRef,
+        mode: IteratorMode,
+    ) -> DBIteratorWithThreadMode<'b, Self> {
+        let opts = ReadOptions::default();
+        DBIteratorWithThreadMode::new_cf(self, cf_handle.inner(), opts, mode)
+    }
+
+    pub fn full_iterator_cf<'a: 'b, 'b>(
+        &'a self,
+        cf_handle: &impl AsColumnFamilyRef,
+        mode: IteratorMode,
+    ) -> DBIteratorWithThreadMode<'b, Self> {
+        let mut opts = ReadOptions::default();
+        opts.set_total_order_seek(true);
+        DBIteratorWithThreadMode::new_cf(self, cf_handle.inner(), opts, mode)
+    }
+
+    pub fn prefix_iterator_cf<'a, P: AsRef<[u8]>>(
+        &'a self,
+        cf_handle: &impl AsColumnFamilyRef,
+        prefix: P,
+    ) -> DBIteratorWithThreadMode<'a, Self> {
+        let mut opts = ReadOptions::default();
+        opts.set_prefix_same_as_start(true);
+        DBIteratorWithThreadMode::<'a, Self>::new_cf(
+            self,
+            cf_handle.inner(),
+            opts,
+            IteratorMode::From(prefix.as_ref(), Direction::Forward),
+        )
+    }
+
+    /// Opens a raw iterator over the database, using the default read options
+    pub fn raw_iterator<'a: 'b, 'b>(&'a self) -> DBRawIteratorWithThreadMode<'b, Self> {
+        let opts = ReadOptions::default();
+        DBRawIteratorWithThreadMode::new(self, opts)
+    }
+
+    /// Opens a raw iterator over the given column family, using the default read options
+    pub fn raw_iterator_cf<'a: 'b, 'b>(
+        &'a self,
+        cf_handle: &impl AsColumnFamilyRef,
+    ) -> DBRawIteratorWithThreadMode<'b, Self> {
+        let opts = ReadOptions::default();
+        DBRawIteratorWithThreadMode::new_cf(self, cf_handle.inner(), opts)
+    }
+
+    /// Opens a raw iterator over the database, using the given read options
+    pub fn raw_iterator_opt<'a: 'b, 'b>(
+        &'a self,
+        readopts: ReadOptions,
+    ) -> DBRawIteratorWithThreadMode<'b, Self> {
+        DBRawIteratorWithThreadMode::new(self, readopts)
+    }
+
+    /// Opens a raw iterator over the given column family, using the given read options
+    pub fn raw_iterator_cf_opt<'a: 'b, 'b>(
+        &'a self,
+        cf_handle: &impl AsColumnFamilyRef,
+        readopts: ReadOptions,
+    ) -> DBRawIteratorWithThreadMode<'b, Self> {
+        DBRawIteratorWithThreadMode::new_cf(self, cf_handle.inner(), readopts)
+    }
+
+    pub fn get_writebatch(&self) -> WriteBatchWithTransaction<true> {
+        unsafe {
+            let wi = ffi::rocksdb_transaction_get_writebatch_wi(self.inner);
+            let mut len: usize = 0;
+            let ptr = ffi::rocksdb_writebatch_wi_data(wi, std::ptr::from_mut(&mut len));
+            let writebatch = ffi::rocksdb_writebatch_create_from(ptr, len);
+            ffi::rocksdb_free(wi as *mut c_void);
+            WriteBatchWithTransaction { inner: writebatch }
+        }
+    }
+
+    pub fn rebuild_from_writebatch(
+        &self,
+        writebatch: &WriteBatchWithTransaction<true>,
+    ) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_rebuild_from_writebatch(
+                self.inner,
+                writebatch.inner
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replays the writes indexed by `writebatch` into this transaction.
+    ///
+    /// RocksDB walks the batch underlying the index and re-applies each record through
+    /// this transaction's own put, merge and delete, so the keys end up tracked and
+    /// conflict checked as if they had been written on the transaction directly. Under
+    /// [`TxnDBWritePolicy::WriteUnprepared`] the records are already in the DB from WAL
+    /// replay, so RocksDB only re-tracks the keys instead of rewriting them.
+    ///
+    /// Nothing is cleared first, so this layers on top of whatever the transaction
+    /// already holds. Run it on a fresh transaction that has not been prepared or
+    /// committed, the way RocksDB uses it when rebuilding prepared transactions during
+    /// recovery. `writebatch` is only read, never taken over or modified.
+    ///
+    /// Returns an error if the batch carries two-phase commit markers, or if a replayed
+    /// write fails for any of the reasons listed on [`put_cf`].
+    ///
+    /// [`TxnDBWritePolicy::WriteUnprepared`]: crate::TxnDBWritePolicy::WriteUnprepared
+    /// [`put_cf`]: Self::put_cf
+    pub fn rebuild_from_writebatch_wi(
+        &self,
+        writebatch: &WriteBatchWithIndex,
+    ) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(ffi::rocksdb_transaction_rebuild_from_writebatch_wi(
+                self.inner,
+                writebatch.inner
+            ));
+        }
+        Ok(())
+    }
+
+    /// Appends a blob of arbitrary size to the records in this transaction.
+    ///
+    /// The blob goes into the WAL only. It is never written to an SST file and is never
+    /// visible to any read, so no `get` or iterator will ever return it. Iterating the
+    /// transaction's write batch surfaces it through
+    /// [`WriteBatchIterator::log_data`], interleaved with the puts, deletes and merges
+    /// in insertion order. It consumes no sequence number and does not change the
+    /// batch's count.
+    ///
+    /// A typical use is stamping the transaction log with data needed for replication.
+    ///
+    /// [`WriteBatchIterator::log_data`]: crate::WriteBatchIterator::log_data
+    pub fn put_log_data<V: AsRef<[u8]>>(&self, log_data: V) {
+        let log_data = log_data.as_ref();
+        unsafe {
+            ffi::rocksdb_transaction_put_log_data(
+                self.inner,
+                log_data.as_ptr() as *const c_char,
+                log_data.len() as size_t,
+            );
+        }
+    }
+
+    /// Sets the commit timestamp for this transaction.
+    ///
+    /// Only meaningful when the column family uses user-defined timestamps. RocksDB
+    /// reports an unsupported timestamp through a status that the C API discards, so
+    /// calling this on a transaction without timestamp support does nothing.
+    pub fn set_commit_timestamp(&self, val: u64) {
+        unsafe {
+            ffi::rocksdb_transaction_set_commit_timestamp(self.inner, val);
+        }
+    }
+
+    /// Sets the read timestamp used to validate this transaction's reads.
+    ///
+    /// Only meaningful when the column family uses user-defined timestamps. RocksDB
+    /// reports an unsupported timestamp through a status that the C API discards, so
+    /// calling this on a transaction without timestamp support does nothing.
+    pub fn set_read_timestamp_for_validation(&self, val: u64) {
+        unsafe {
+            ffi::rocksdb_transaction_set_read_timestamp_for_validation(self.inner, val);
+        }
+    }
+}
+
+impl<DB> Drop for Transaction<'_, DB> {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::rocksdb_transaction_destroy(self.inner);
+        }
+    }
+}
