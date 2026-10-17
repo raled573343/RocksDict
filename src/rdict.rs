@@ -448,39 +448,26 @@ impl Rdict {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let db = self.get_db()?;
-        let read_opt_option = match read_opt {
-            None => None,
-            Some(opt) => Some(opt.to_read_options(self.opt_py.raw_mode, py)?),
-        };
-        let read_opt = match &read_opt_option {
-            None => &self.read_opt,
-            Some(opt) => opt,
-        };
         let cf = match &self.column_family {
-            None => {
-                self.get_column_family_handle(DEFAULT_COLUMN_FAMILY_NAME)?
-                    .cf
-            }
             Some(cf) => cf.clone(),
+            None => self.get_column_family_handle(DEFAULT_COLUMN_FAMILY_NAME)?.cf,
         };
         let key_bytes = encode_key(key, self.opt_py.raw_mode)?;
-        let column_result = db
-            .get_entity_cf_opt(&cf, key_bytes, read_opt)
-            .map_err(|e| PyException::new_err(e.to_string()))?;
+        // This C API bridge uses a separate owned C ReadOptions object, because
+        // the current rust-rocksdb 0.53 ReadOptions exposes no raw pointer.
+        let opt = match read_opt {
+            Some(value) => value.to_read_opt(self.opt_py.raw_mode, py)?,
+            None => self.read_opt_py.to_read_opt(self.opt_py.raw_mode, py)?,
+        };
+        let column_result =
+            crate::wide_columns::get_entity(db, &cf, &opt, &key_bytes)?;
         match column_result {
-            None => {
-                // try to return default value
-                if let Some(default) = default {
-                    Ok(default)
-                } else {
-                    Ok(py.None().bind(py).to_owned())
-                }
-            }
+            None => Ok(default.unwrap_or_else(|| py.None().bind(py).to_owned())),
             Some(columns) => {
                 let result = PyList::empty(py);
-                for column in columns.iter() {
-                    let name = decode_value(py, column.name, &self.loads, self.opt_py.raw_mode)?;
-                    let value = decode_value(py, column.value, &self.loads, self.opt_py.raw_mode)?;
+                for (name, value) in columns {
+                    let name = decode_value(py, &name, &self.loads, self.opt_py.raw_mode)?;
+                    let value = decode_value(py, &value, &self.loads, self.opt_py.raw_mode)?;
                     result.append(PyTuple::new(py, [name, value])?)?;
                 }
                 Ok(result.into_any())
@@ -542,35 +529,27 @@ impl Rdict {
         values: Vec<Bound<PyAny>>,
         write_opt: Option<&WriteOptionsPy>,
     ) -> PyResult<()> {
-        let db = self.get_db()?;
-        let key = encode_key(key, self.opt_py.raw_mode)?;
-        let write_opt_option = write_opt.map(WriteOptions::from);
-        let write_opt = match &write_opt_option {
-            None => &self.write_opt,
-            Some(opt) => opt,
-        };
-        let cf = match &self.column_family {
-            None => {
-                self.get_column_family_handle(DEFAULT_COLUMN_FAMILY_NAME)?
-                    .cf
-            }
-            Some(cf) => cf.clone(),
-        };
         if names.len() != values.len() {
-            return Err(PyException::new_err(
-                "names and values must have the same length",
-            ));
+            return Err(PyException::new_err("names and values must have the same length"));
         }
-        let mut names_vec = Vec::with_capacity(names.len());
-        let mut values_vec = Vec::with_capacity(values.len());
-        for name in names.iter() {
-            names_vec.push(encode_value(name, &self.dumps, self.opt_py.raw_mode)?);
-        }
-        for value in values.iter() {
-            values_vec.push(encode_value(value, &self.dumps, self.opt_py.raw_mode)?);
-        }
-        db.put_entity_cf_opt(&cf, key, &names_vec, &values_vec, write_opt)
-            .map_err(|e| PyException::new_err(e.to_string()))
+        let db = self.get_db()?;
+        let cf = match &self.column_family {
+            Some(cf) => cf.clone(),
+            None => self.get_column_family_handle(DEFAULT_COLUMN_FAMILY_NAME)?.cf,
+        };
+        let key_bytes = encode_key(key, self.opt_py.raw_mode)?;
+        let names_vec = names.iter()
+            .map(|value| encode_value(value, &self.dumps, self.opt_py.raw_mode))
+            .collect::<PyResult<Vec<_>>>()?;
+        let values_vec = values.iter()
+            .map(|value| encode_value(value, &self.dumps, self.opt_py.raw_mode))
+            .collect::<PyResult<Vec<_>>>()?;
+        let name_buffers: Vec<Vec<u8>> = names_vec.into_iter().map(|v| v.into_owned()).collect();
+        let value_buffers: Vec<Vec<u8>> = values_vec.into_iter().map(|v| v.into_owned()).collect();
+        let flags = write_opt.unwrap_or(&self.write_opt_py).native_flags();
+        crate::wide_columns::put_entity(
+            db, &cf, &key_bytes, &name_buffers, &value_buffers, flags,
+        )
     }
 
     fn __contains__(&self, key: &Bound<PyAny>) -> PyResult<bool> {

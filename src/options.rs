@@ -2135,6 +2135,19 @@ impl WriteOptionsPy {
     }
 }
 
+impl WriteOptionsPy {
+    /// Mirror RocksDB 11.8 WriteOptions fields across the narrow wide-column C ABI.
+    /// The bridge uses the exact same bit assignments in rocksdb11_bridge.cc.
+    pub(crate) fn native_flags(&self) -> u32 {
+        (self.sync as u32)
+            | ((self.disable_wal as u32) << 1)
+            | ((self.ignore_missing_column_families as u32) << 2)
+            | ((self.no_slowdown as u32) << 3)
+            | ((self.low_pri as u32) << 4)
+            | ((self.memtable_insert_hint_per_batch as u32) << 5)
+    }
+}
+
 impl From<&WriteOptionsPy> for WriteOptions {
     fn from(w_opt: &WriteOptionsPy) -> Self {
         let mut opt = WriteOptions::default();

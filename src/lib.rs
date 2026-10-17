@@ -1,4 +1,5 @@
 mod compat;
+mod wide_columns;
 mod checkpoints;
 mod db_reference;
 mod encoder;
@@ -109,9 +110,16 @@ use pyo3::prelude::*;
 ///     supports `pickle`.
 ///
 // PyO3 0.27 defaults to gil_used=true: explicitly opt in for CPython 3.14t.
+/// Native C++ library version compiled into this extension (not a Python wheel label).
+#[pyfunction]
+fn native_rocksdb_version() -> (i32, i32, i32) {
+    wide_columns::native_version()
+}
+
 #[pymodule(gil_used = false)]
 fn rocksdict(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<Rdict>()?;
+    m.add_function(wrap_pyfunction!(native_rocksdb_version, m)?)?;
     m.add_class::<OptionsPy>()?;
     m.add_class::<MemtableFactoryPy>()?;
     m.add_class::<BlockBasedOptionsPy>()?;

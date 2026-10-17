@@ -41,6 +41,9 @@ bindgen-runtime = ["rocksdb/bindgen-runtime"]
 bindgen-static = ["rocksdb/bindgen-static"]
 lto = ["rocksdb/lto"]
 
+[build-dependencies]
+cc = "1.2"
+
 [dependencies.pyo3]
 version = "0.27"
 features = ["py-clone", "extension-module", "num-bigint"]

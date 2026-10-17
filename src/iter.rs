@@ -332,23 +332,21 @@ impl RdictIter {
     ///    with default column name (empty bytes/string).
     ///    None or default value if the key does not exist.
     pub fn columns<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        if self.valid() {
-            let columns = unsafe {
-                WideColumns::from_c(librocksdb_sys::rocksdb_iter_columns(
-                    *self.inner.lock().unwrap(),
-                ))
-            };
-            let result = PyList::empty(py);
-            for column in columns.iter() {
-                let name = decode_value(py, column.name, &self.loads, self.raw_mode)?;
-                let value = decode_value(py, column.value, &self.loads, self.raw_mode)?;
-                result.append(PyTuple::new(py, [name, value])?)?;
-            }
-            Ok(result.into_any())
-        } else {
-            Ok(py.None().bind(py).to_owned())
+        if !self.valid() {
+            return Ok(py.None().bind(py).to_owned());
         }
+        // Native iterator lock protects the pointer for the full C++ copy.
+        let inner = self.inner.lock().unwrap();
+        let columns = crate::wide_columns::iterator_columns(*inner)?;
+        let result = PyList::empty(py);
+        for (name, value) in columns {
+            let name = decode_value(py, &name, &self.loads, self.raw_mode)?;
+            let value = decode_value(py, &value, &self.loads, self.raw_mode)?;
+            result.append(PyTuple::new(py, [name, value])?)?;
+        }
+        Ok(result.into_any())
     }
+
 }
 
 impl Drop for RdictIter {

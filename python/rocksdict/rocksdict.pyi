@@ -1,3 +1,7 @@
+def native_rocksdb_version() -> Tuple[int, int, int]:
+    """Native RocksDB version linked into the extension; (11, 8, 1) for this port."""
+    ...
+
 from __future__ import annotations
 
 from types import TracebackType
