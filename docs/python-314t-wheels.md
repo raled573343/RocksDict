@@ -61,10 +61,12 @@ and Cargo manifests. The cache restores and saves:
 - Windows additionally caches the LLVM/Clang 21.1.3 installation and skips
   downloading/installing it after an exact cache hit.
 
-On Linux, `CARGO_HOME` and `CARGO_TARGET_DIR` explicitly point inside the
-host-mounted workspace **in the manylinux Docker container**, so Actions sees
-and caches the files produced during the container build. The cache is restored
-before Maturin starts; it is saved at the end even on failed test runs.
+On Linux, `CARGO_HOME` remains at the container default (`/root/.cargo`)
+so the `rustup` launcher stays available. Only its `registry` and `git`
+subdirectories are bind-mounted from the host workspace. `CARGO_TARGET_DIR`
+points into that same shared workspace for Rust/C++ build outputs.
+On Windows the default `~/.cargo/registry` and `~/.cargo/git` are cached.
+The cache is restored before Maturin starts and saved even after failed tests.
 
 The **first run fills the cache** and still compiles `once_cell` and RocksDB.
 A warm cache saves the work on subsequent compatible runs, provided the
